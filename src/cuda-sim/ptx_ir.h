@@ -1322,6 +1322,8 @@ class ptx_instruction : public warp_inst_t {
     if (m_opcode == LD_OP || m_opcode == LDU_OP || m_opcode == TEX_OP ||
         m_opcode == MMA_LD_OP)
       return true;
+    // red reads the target like atom; the callback writes back.
+    if (m_opcode == RED_OP) return true;
     if (m_is_ldgsts) return true;
     // Check PTXPlus operand type below
     // Source operands are memory operands

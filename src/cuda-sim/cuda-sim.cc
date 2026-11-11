@@ -1489,6 +1489,7 @@ void ptx_instruction::set_opcode_and_latency() {
       mem_op = TEX;
       break;
     case ATOM_OP:
+    case RED_OP:
       op = LOAD_OP;
       break;
     case BAR_OP:
@@ -2098,7 +2099,7 @@ void ptx_instruction::pre_decode() {
       // else if( m_opcode == ST_OP )
       else if (m_opcode == MMA_ST_OP || m_opcode == ST_OP)
         cache_op = CACHE_WRITE_BACK;
-      else if (m_opcode == ATOM_OP)
+      else if (m_opcode == ATOM_OP || m_opcode == RED_OP)
         cache_op = CACHE_GLOBAL;
       break;
   }
@@ -2926,13 +2927,15 @@ using flash_gpgpu_sim::wgmma_wait_group_impl;
                         false /*not atomic*/);
     }
 
-    if (pI->get_opcode() == ATOM_OP) {
+    // red is modelled with atom's memory timing (same atomic callback).
+    if (pI->get_opcode() == ATOM_OP || pI->get_opcode() == RED_OP) {
       insn_memaddr = last_eaddr();
       insn_space = last_space();
       inst.add_callback(lane_id, last_callback().function,
                         last_callback().instruction, this, true /*atomic*/);
       unsigned to_type = pI->get_type();
       insn_data_size = datatype2size(to_type);
+      if (pI->get_opcode() == RED_OP) insn_memory_op = memory_load;
     }
 
     if (pI->get_opcode() == TEX_OP) {

@@ -1461,6 +1461,13 @@ void bar_callback(const inst_t *inst, ptx_thread_info *thread) {
   thread->set_operand_value(dst, value, U32_TYPE, thread, pI);
 }
 
+static bool atomic_rmw_compute(const ptx_instruction *pI,
+                               ptx_thread_info *thread, unsigned m_atomic_spec,
+                               unsigned to_type, const ptx_reg_t &data,
+                               const ptx_reg_t &src2_data,
+                               const operand_info &type_ref,
+                               ptx_reg_t &op_result);
+
 void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
   const ptx_instruction *pI = dynamic_cast<const ptx_instruction *>(inst);
 
@@ -1518,6 +1525,30 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
   // Get the atomic operation to be performed
   unsigned m_atomic_spec = pI->get_atomic();
 
+  data_ready = atomic_rmw_compute(pI, thread, m_atomic_spec, to_type, data,
+                                  src2_data, dst, op_result);
+
+  // Write operation result into  memory
+  // (i.e. copy src1_data to dst)
+  if (data_ready) {
+    mem->write(effective_address, size / 8, &op_result.s64, thread, pI);
+  } else {
+    printf("Execution error: data_ready not set\n");
+    assert(0);
+  }
+}
+
+// Shared read-modify-write for atom/red callbacks: given the memory value
+// already read into 'data' and operand b in 'src2_data', compute the result
+// to write back. 'type_ref' supplies the operand used to type-check CAS's
+// compare operand; for red there is no dst so callers pass src1.
+static bool atomic_rmw_compute(const ptx_instruction *pI,
+                               ptx_thread_info *thread, unsigned m_atomic_spec,
+                               unsigned to_type, const ptx_reg_t &data,
+                               const ptx_reg_t &src2_data,
+                               const operand_info &type_ref,
+                               ptx_reg_t &op_result) {
+  bool data_ready = false;
   switch (m_atomic_spec) {
     // AND
     case ATOMIC_AND: {
@@ -1592,7 +1623,8 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
     case ATOMIC_CAS: {
       ptx_reg_t src3_data;
       const operand_info &src3 = pI->src3();
-      src3_data = thread->get_operand_value(src3, dst, to_type, thread, 1);
+      src3_data =
+          thread->get_operand_value(src3, type_ref, to_type, thread, 1);
 
       switch (to_type) {
         case B32_TYPE:
@@ -1775,10 +1807,47 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
       break;
     }
   }
+  return data_ready;
+}
 
-  // Write operation result into  memory
-  // (i.e. copy src1_data to dst)
-  if (data_ready) {
+// red_callback is like atom_callback but the instruction has no destination
+// register: operand 0 is the address, operand 1 the value, and the RMW result
+// goes to memory only.
+void red_callback(const inst_t *inst, ptx_thread_info *thread) {
+  const ptx_instruction *pI = dynamic_cast<const ptx_instruction *>(inst);
+
+  unsigned to_type = pI->get_type();
+  size_t size;
+  int t;
+  type_info_key::type_decode(to_type, size, t);
+
+  ptx_reg_t data;
+  ptx_reg_t src1_data;
+  ptx_reg_t src2_data;
+  ptx_reg_t op_result;
+
+  const operand_info &src1 = pI->dst();   // a (address, operand 0)
+  const operand_info &src2 = pI->src1();  // b (value)
+
+  src1_data = thread->get_operand_value(src1, src1, to_type, thread, 1);
+  src2_data = thread->get_operand_value(src2, src1, to_type, thread, 1);
+
+  addr_t effective_address = src1_data.u64;
+  memory_space_t space = pI->get_space();
+  normalize_scoped_shared_space(space, pI);
+  if (space == undefined_space) space = generic_space;
+  if (space == shared_space && effective_address < SHARED_GENERIC_START)
+    effective_address &= 0x00000000FFFFFFFFULL;
+  memory_space *mem = NULL;
+  decode_space(space, thread, src1, mem, effective_address);
+  assert(mem);
+  assert(space == global_space || space == shared_space);
+
+  mem->read(effective_address, size / 8, &data.s64);
+
+  unsigned m_atomic_spec = pI->get_atomic();
+  if (atomic_rmw_compute(pI, thread, m_atomic_spec, to_type, data, src2_data,
+                         src1, op_result)) {
     mem->write(effective_address, size / 8, &op_result.s64, thread, pI);
   } else {
     printf("Execution error: data_ready not set\n");
@@ -5909,7 +5978,52 @@ void rcp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 }
 
 void red_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  inst_not_implemented(pI);
+  // SYNTAX
+  // red{.sem}{.scope}{.space}.op.type [a], b;  -- atom without a destination.
+  // Modelled with atom's memory timing (same callback mechanism); red.async
+  // and remote-DSM red are not supported.
+
+  const auto &options = pI->get_options();
+  if (std::find(options.begin(), options.end(), ASYNC_OPTION) !=
+      options.end()) {
+    printf("GPGPU-Sim PTX: ERROR ** red.async is not supported\n");
+    printf("  Instruction: %s\n", pI->to_string().c_str());
+    abort();
+  }
+
+  // obtain memory space of the operation
+  memory_space_t space = pI->get_space();
+  normalize_scoped_shared_space(space, pI);
+
+  // get the memory address (operand 0; operand 1 is the value)
+  const operand_info &src1 = pI->dst();
+  unsigned i_type = pI->get_type();
+  ptx_reg_t src1_data;
+  src1_data = thread->get_operand_value(src1, src1, i_type, thread, 1);
+  addr_t effective_address = src1_data.u64;
+
+  if (space == undefined_space)
+    space = generic_space;
+  if (space == shared_space && effective_address < SHARED_GENERIC_START)
+    effective_address &= 0x00000000FFFFFFFFULL;
+  memory_space *mem = NULL;
+  decode_space(space, thread, src1, mem, effective_address);
+  (void)mem;
+  assert(space == global_space || space == shared_space);
+
+  if (thread->m_dsm_remote) {
+    printf("GPGPU-Sim PTX: ERROR ** remote DSM red is not supported\n");
+    printf("  Instruction: %s\n", pI->to_string().c_str());
+    fprintf(stderr,
+            "GPGPU-Sim PTX: ERROR ** remote DSM red is not supported: %s\n",
+            pI->to_string().c_str());
+    abort();
+  }
+
+  thread->m_last_effective_address = effective_address;
+  thread->m_last_memory_space = space;
+  thread->m_last_dram_callback.function = red_callback;
+  thread->m_last_dram_callback.instruction = pI;
 }
 
 void rem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
