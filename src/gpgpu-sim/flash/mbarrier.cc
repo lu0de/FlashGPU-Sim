@@ -635,6 +635,58 @@ void handle_mbarrier_inst(const ptx_instruction *pIin,
         "with expected "
         "count %u\n",
         ctaid, hw_tid, laneid, addr, expected_count);
+  } else if (bar_op == TEST_WAIT_OPTION) {
+
+    assert(pI->parity_op() && "Only support parity op of mbarrier.test_wait");
+    assert(
+        (pI->get_num_operands() == 3 || pI->get_num_operands() == 4) &&
+        "mbarrier.test_wait expects predicate, address, parity, and optional "
+        "suspendTimeHint");
+
+    const operand_info &addr_op = pI->src1();
+    const operand_info &parity_op = pI->src2();
+    uint64_t raw_addr = get_mbar_addr(addr_op);
+    uint32_t addr32 = static_cast<uint32_t>(raw_addr);
+    unsigned owner = 0;
+    addr_t off = 0;
+    const bool looks_mapped = raw_addr >= SHARED_MEM_SIZE_MAX &&
+                              decode_mbar_address(raw_addr, &owner, &off);
+    if (!looks_mapped) {
+      assert(is_shared_level(&addr32) && "Only support shared mbarrier");
+      raw_addr = addr32;
+    }
+    auto parity = get_u32_value(parity_op) & 1;
+
+    // Non-blocking query: evaluate the local barrier's phase directly and
+    // write the predicate immediately. Remote (mapa) test_wait falls back to
+    // the local manager keyed on the decoded offset when the owner is this SM.
+    auto *core = static_cast<shader_core_ctx *>(thread->get_core());
+    flash_gpgpu_sim::mbarrier_manager_t::thread_index_t tidx{};
+    tidx.hw_cta_id = (int)thread->get_hw_ctaid();
+    tidx.hw_warp_id = (int)(thread->get_flat_tid() / 32);
+    tidx.sw_cta_id = (int)thread->get_cta_uid();
+    tidx.sw_warp_id = tidx.hw_warp_id;
+    tidx.sm_id = (int)thread->get_hw_sid();
+    bool complete = false;
+    if (looks_mapped && owner != thread->get_hw_sid()) {
+      // Remote barrier state lives in the owner SM's manager; treat as not
+      // yet complete rather than fabricating success.
+      complete = false;
+    } else {
+      complete = core->get_barriers()->get_mbarrier_manager().test_wait(
+          thread->get_gpu(), tidx, looks_mapped ? off : raw_addr, parity);
+    }
+    // PTXPlus dest pred: 0 = true, 1 = false (matches try_wait writeback).
+    ptx_reg_t pred;
+    pred.pred = complete ? 0 : 1;
+    thread->set_operand_value(pI->dst(), pred, PRED_TYPE, thread, pI);
+
+    GPPRINTF_GPU_CORE(
+        thread->get_gpu(), thread->get_hw_sid(), MBAR,
+        "CTA %d Thread %d (lane %u) mbarrier.test_wait at address 0x%x "
+        "parity %u complete=%u\n",
+        ctaid, hw_tid, laneid, addr32, parity, (unsigned)complete);
+
   } else if (bar_op == TRY_WAIT_OPTION) {
 
     assert(pI->parity_op() && "Only support parity op of mbarrier.try_wait");

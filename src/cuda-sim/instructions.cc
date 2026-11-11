@@ -2409,12 +2409,12 @@ void bfind_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   }
 
   // negate negative signed inputs
-  if ((i_type == S32_TYPE || i_type == S64_TYPE) && (a & (1 << msb))) {
+  if ((i_type == S32_TYPE || i_type == S64_TYPE) && (a & (1ULL << msb))) {
     a = ~a;
   }
   uint32_t d_data = 0xffffffff;
   for (uint32_t i = msb; i >= 0; i--) {
-    if (a & (1 << i)) {
+    if (a & (1ULL << i)) {
       d_data = i;
       break;
     }

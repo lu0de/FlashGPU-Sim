@@ -198,6 +198,7 @@ class ptx_recognizer;
 %token COMPLETE_TX_OPTION
 %token INIT_OPTION
 %token TRY_WAIT_OPTION
+%token TEST_WAIT_OPTION
 %token WAIT_OPTION
 %token PARITY_OPTION
 %token TMA_MBAR_COMPLETE_BYTES
@@ -667,6 +668,7 @@ option: type_spec
 	| RED_OPTION { recognizer->add_option(RED_OPTION); }
 	| INIT_OPTION { recognizer->add_option(INIT_OPTION); }
 	| TRY_WAIT_OPTION { recognizer->add_option(TRY_WAIT_OPTION); }
+	| TEST_WAIT_OPTION { recognizer->add_option(TEST_WAIT_OPTION); }
 	| WAIT_OPTION { recognizer->add_option(WAIT_OPTION); }
 	| PARITY_OPTION { recognizer->add_option(PARITY_OPTION); }
 	| TMA_MBAR_COMPLETE_BYTES { recognizer->add_option(TMA_MBAR_COMPLETE_BYTES); }

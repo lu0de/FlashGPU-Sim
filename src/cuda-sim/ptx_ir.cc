@@ -1543,6 +1543,7 @@ ptx_instruction::ptx_instruction(
       case INIT_OPTION:
       case INVAL_OPTION:
       case TRY_WAIT_OPTION:
+      case TEST_WAIT_OPTION:
       case EXPECT_TX_OPTION:
       case COMPLETE_TX_OPTION:
         m_barrier_op = last_ptx_inst_option;
