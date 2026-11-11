@@ -57,6 +57,7 @@ class ptx_recognizer;
 #include "../gpgpu-sim/flash/elect.h"
 #include "../gpgpu-sim/flash/mbarrier.h"
 #include "../gpgpu-sim/flash/ld_st_matrix.h"
+#include "../gpgpu-sim/flash/lowp_float.h"
 #include "../gpgpu-sim/flash/tcgen05.h"
 #include "../gpgpu-sim/flash/tma.h"
 #include "../gpgpu-sim/flash/tb_cluster.h"
@@ -3567,6 +3568,63 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   unsigned src_fmt =
       type_info_key::type_decode(from_type, from_width, from_sign);
   unsigned dst_fmt = type_info_key::type_decode(to_type, to_width, to_sign);
+
+  // cvt.rn.satfinite{,.relu}.{e4m3x2,e5m2x2}.f32: pack two f32 sources into
+  // one packed fp8 pair. src1 lands in the high byte, src2 in the low byte.
+  if ((to_type == E4M3X2_TYPE || to_type == E5M2X2_TYPE) &&
+      from_type == F32_TYPE) {
+    assert(pI->get_num_operands() >= 3 &&
+           "cvt.{e4m3x2,e5m2x2}.f32 requires 3 operands (dst, src1, src2).");
+    const std::vector<operand_info> &operands = pI->get_operands();
+    const operand_info &src2 = operands[2];
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t src2_data =
+        thread->get_operand_value(src2, dst, from_type, thread, 1);
+    const bool is_e4m3 = to_type == E4M3X2_TYPE;
+    float hi = src1_data.f32;
+    float lo = src2_data.f32;
+    if (pI->is_relu()) {
+      // relu clamps negatives (including -0) to +0 but keeps NaN.
+      hi = std::signbit(hi) && !std::isnan(hi) ? 0.0f : hi;
+      lo = std::signbit(lo) && !std::isnan(lo) ? 0.0f : lo;
+    }
+    ptx_reg_t result;
+    result.u64 = 0;
+    result.u16 =
+        (static_cast<uint16_t>(flash_gpgpu_sim::f32_to_fp8(hi, is_e4m3)) << 8) |
+        flash_gpgpu_sim::f32_to_fp8(lo, is_e4m3);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // cvt.rn{,.relu}.f16x2.{e4m3x2,e5m2x2}: low byte -> low half, high byte ->
+  // high half.
+  if (to_type == F16X2_TYPE &&
+      (from_type == E4M3X2_TYPE || from_type == E5M2X2_TYPE)) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    const bool is_e4m3 = from_type == E4M3X2_TYPE;
+    const bool relu = pI->is_relu();
+    auto decode_lane = [&](uint8_t byte) -> uint16_t {
+      // fp8 NaN encodings produce the canonical positive f16 NaN.
+      bool nan = is_e4m3 ? (byte & 0x7Fu) == 0x7Fu : (byte & 0x7Fu) >= 0x7Du;
+      if (nan)
+        return 0x7FFF;
+      float f = flash_gpgpu_sim::fp8_to_f32(byte, is_e4m3);
+      if (relu && std::signbit(f))
+        f = 0.0f;
+      return f16_bits_from_f32(f, RN_OPTION);
+    };
+    uint16_t lo16 = decode_lane(static_cast<uint8_t>(src1_data.u16 & 0xFFu));
+    uint16_t hi16 =
+        decode_lane(static_cast<uint8_t>((src1_data.u16 >> 8) & 0xFFu));
+    ptx_reg_t result;
+    result.u32 =
+        (static_cast<uint32_t>(hi16) << 16) | static_cast<uint32_t>(lo16);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
 
   // Special handling for cvt.f16x2.f32: convert two f32 sources to one f16x2 destination
   if (to_type == F16X2_TYPE && from_type == F32_TYPE) {

@@ -7,6 +7,7 @@ sources = [
   # Host-side simulator regression.
   "unit/register_view_reload_test.cc",
   "unit/cvt_bf16_test.cu",
+  "unit/cvt_fp8_test.cu",
   "unit/mbarrier_retry_timing_test.cc",
 
   # Portable integration tests.
