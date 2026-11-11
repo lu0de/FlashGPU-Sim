@@ -1299,6 +1299,7 @@ class ptx_instruction : public warp_inst_t {
   bool is_uni() const { return m_uni; }
   bool is_exit() const { return m_exit; }
   bool is_abs() const { return m_abs; }
+  bool is_relu() const { return m_relu; }
   bool is_neg() const { return m_neg; }
   bool is_to() const { return m_to_option; }
   unsigned cache_option() const { return m_cache_option; }
@@ -1390,6 +1391,7 @@ class ptx_instruction : public warp_inst_t {
   mma_layout_mode m_mma_layout_b;
   bool m_is_mma_instruction;
   bool m_mma_saturate;
+  bool m_relu;
   bool m_is_wgmma_instruction;
   bool m_wgmma_sparse;
   bool m_wgmma_saturate;

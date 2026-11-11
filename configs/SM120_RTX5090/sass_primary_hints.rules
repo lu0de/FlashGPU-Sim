@@ -28,6 +28,12 @@ shfl.sync.bfly.b32 = SHFL.BFLY
 setp.eq.ftz.f32 = FSETP.NEU.FTZ.AND, FSETP.NE.FTZ.AND
 setp.equ.ftz.f32 = FSETP.NEU.FTZ.AND, FSETP.NE.FTZ.AND
 
+# bf16 conversions.
+cvt.rn.bf16x2.f32 = F2FP.BF16.F32.PACK_AB
+cvt.rz.bf16x2.f32 = F2FP.BF16.F32.PACK_AB.RZ
+cvt.rn.bf16.f32 = F2F.BF16.F32, F2FP.BF16.F32.PACK_AB
+cvt.rz.bf16.f32 = F2F.BF16.F32.RZ
+
 [attached_opcode_allowlist]
 # These were observed as non-primary SASS sharing a PTX line with one of the
 # primary opcodes above. They should not become guide anchors.

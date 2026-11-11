@@ -35,7 +35,7 @@ void tensor_wgmma_impl(const ptx_instruction *pI, core_t *core,
                        warp_inst_t &inst);
 void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
                              warp_inst_t &inst);
-void wgmma_m64n8k16_bf16_impl(const ptx_instruction *pI, core_t *core,
+void wgmma_m64nXk16_bf16_impl(const ptx_instruction *pI, core_t *core,
                               warp_inst_t &inst);
 void wgmma_m64n8k8_tf32_impl(const ptx_instruction *pI, core_t *core,
                              warp_inst_t &inst);

@@ -1429,7 +1429,8 @@ void ptx_instruction::set_opcode_and_latency() {
       }
       break;
     case CVT_OP:
-      if (m_scalar_type.size() == 2 && get_type() == F16X2_TYPE &&
+      if (m_scalar_type.size() == 2 &&
+          (get_type() == F16X2_TYPE || get_type() == BF16X2_TYPE) &&
           get_type2() == F32_TYPE) {
         latency = gpgpu_ctx->func_sim->opcode_latency_cvt_f16x2_f32;
         initiation_interval =

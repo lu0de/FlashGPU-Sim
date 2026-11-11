@@ -890,27 +890,30 @@ void ptx_recognizer::end_vector_operand() {
     const bool is_store_source =
         g_opcode == ST_OP && g_vector_operand_start == 1;
     const bool is_mov_pack = g_opcode == MOV_OP && g_vector_operand_start == 1 &&
-                             g_scalar_type_spec == B64_TYPE;
+                             (g_scalar_type_spec == B64_TYPE ||
+                              g_scalar_type_spec == B32_TYPE);
     parse_assert(is_store_source || is_mov_pack,
                  "literal vector operands are only valid as store sources "
-                 "or mov.b64 pack sources.");
+                 "or mov.b64/mov.b32 pack sources.");
 
     if (is_mov_pack) {
       parse_assert(components.size() == 2,
-                   "mov.b64 pack source requires two 32-bit components.");
+                   "mov pack source requires two components.");
+      const bool is_b64 = g_scalar_type_spec == B64_TYPE;
       for (const operand_info &component : components) {
         if (component.is_literal()) {
           const enum operand_type type = component.get_type();
           parse_assert(type == int_t || type == unsigned_t,
-                       "mov.b64 pack literals must be integers.");
+                       "mov pack literals must be integers.");
           continue;
         }
         const symbol *symbol = component.get_symbol();
         parse_assert(symbol != NULL && symbol->type() != NULL,
-                     "mov.b64 pack register component has no type.");
+                     "mov pack register component has no type.");
         const int register_type = symbol->type()->get_key().scalar_type();
-        parse_assert(scalar_type_bits(register_type) == 32,
-                     "mov.b64 pack register components must be 32 bits.");
+        parse_assert(scalar_type_bits(register_type) == (is_b64 ? 32 : 16),
+                     is_b64 ? "mov.b64 pack register components must be 32 bits."
+                            : "mov.b32 pack register components must be 16 bits.");
       }
     } else {
       const unsigned vector_width = vector_width_from_options(g_options);

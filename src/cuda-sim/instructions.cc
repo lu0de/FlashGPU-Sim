@@ -282,6 +282,59 @@ static inline float f32_from_f16_bits(uint16_t bits) {
   return half_float::detail::half2float<float>(bits);
 }
 
+static inline float f32_from_bf16_bits(uint16_t bits) {
+  uint32_t u = static_cast<uint32_t>(bits) << 16;
+  float f;
+  std::memcpy(&f, &u, sizeof(f));
+  return f;
+}
+
+// f32 -> bf16. RNE via add-bias trick; inf/+-0 pass through; NaN -> canonical
+// 0x7FFF, as measured on H100 (sm_90a) cvt.*.bf16*.f32 instructions.
+static inline uint16_t bf16_bits_from_f32(float value, unsigned rounding_mode) {
+  uint32_t u;
+  std::memcpy(&u, &value, sizeof(u));
+  if (std::isnan(value)) {
+    return 0x7FFFu;
+  }
+  switch (rounding_mode) {
+    case RZ_OPTION:
+    case RZI_OPTION:
+      return static_cast<uint16_t>(u >> 16);
+    case RM_OPTION:
+    case RMI_OPTION:
+      u += (u & 0x80000000u) ? 0xFFFFu : 0;
+      return static_cast<uint16_t>(u >> 16);
+    case RP_OPTION:
+    case RPI_OPTION:
+      u += (u & 0x80000000u) ? 0 : 0xFFFFu;
+      return static_cast<uint16_t>(u >> 16);
+    case RN_OPTION:
+    case RNI_OPTION:
+    default:
+      u += 0x7FFFu + ((u >> 16) & 1u);
+      return static_cast<uint16_t>(u >> 16);
+  }
+}
+
+
+static inline float relu_f32(float v) {
+  return (v < 0.0f) ? 0.0f : v;  // .relu: clamp negative to +0; NaN stays NaN.
+}
+
+// bf16x2 element-wise helper: unpack two bf16 lanes, apply fn per lane, repack.
+static inline uint32_t bf16x2_apply(uint32_t a_bits, uint32_t b_bits,
+                                    unsigned rounding_mode,
+                                    float (*fn)(float, float)) {
+  float alo = f32_from_bf16_bits(static_cast<uint16_t>(a_bits & 0xFFFFu));
+  float ahi = f32_from_bf16_bits(static_cast<uint16_t>((a_bits >> 16) & 0xFFFFu));
+  float blo = f32_from_bf16_bits(static_cast<uint16_t>(b_bits & 0xFFFFu));
+  float bhi = f32_from_bf16_bits(static_cast<uint16_t>((b_bits >> 16) & 0xFFFFu));
+  uint16_t dlo = bf16_bits_from_f32(fn(alo, blo), rounding_mode);
+  uint16_t dhi = bf16_bits_from_f32(fn(ahi, bhi), rounding_mode);
+  return (static_cast<uint32_t>(dhi) << 16) | static_cast<uint32_t>(dlo);
+}
+
 void ptx_thread_info::set_reg(const symbol *reg, const ptx_reg_t &value) {
   assert(reg != NULL);
   if (reg->name() == "_") return;
@@ -1082,6 +1135,12 @@ void abs_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case U64_TYPE:
       d.s64 = my_abs(a.u64);
       break;
+    case BF16_TYPE:
+      d.u32 = a.u32 & 0x7FFFu;
+      break;
+    case BF16X2_TYPE:
+      d.u32 = a.u32 & 0x7FFF7FFFu;
+      break;
     case F32_TYPE:
       d.f32 = my_abs(a.f32);
       break;
@@ -1269,6 +1328,33 @@ void add_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       }
       uint16_t dlo = f16_bits_from_f32(rlo, rounding_mode);
       uint16_t dhi = f16_bits_from_f32(rhi, rounding_mode);
+      data.u32 = (static_cast<uint32_t>(dhi) << 16) | static_cast<uint32_t>(dlo);
+      break;
+    }
+    case BF16_TYPE: {
+      uint16_t s1 = static_cast<uint16_t>(src1_data.u32 & 0xFFFFu);
+      uint16_t s2 = static_cast<uint16_t>(src2_data.u32 & 0xFFFFu);
+      float r = f32_from_bf16_bits(s1) + f32_from_bf16_bits(s2);
+      if (pI->saturation_mode())
+        r = (r < 0.0f) ? 0.0f : (r > 1.0f) ? 1.0f : r;
+      if (pI->is_relu()) r = relu_f32(r);
+      data.u32 = bf16_bits_from_f32(r, rounding_mode);
+      break;
+    }
+    case BF16X2_TYPE: {
+      uint16_t s1lo = static_cast<uint16_t>(src1_data.u32 & 0xFFFFu);
+      uint16_t s1hi = static_cast<uint16_t>((src1_data.u32 >> 16) & 0xFFFFu);
+      uint16_t s2lo = static_cast<uint16_t>(src2_data.u32 & 0xFFFFu);
+      uint16_t s2hi = static_cast<uint16_t>((src2_data.u32 >> 16) & 0xFFFFu);
+      float rlo = f32_from_bf16_bits(s1lo) + f32_from_bf16_bits(s2lo);
+      float rhi = f32_from_bf16_bits(s1hi) + f32_from_bf16_bits(s2hi);
+      if (pI->saturation_mode()) {
+        rlo = (rlo < 0.0f) ? 0.0f : (rlo > 1.0f) ? 1.0f : rlo;
+        rhi = (rhi < 0.0f) ? 0.0f : (rhi > 1.0f) ? 1.0f : rhi;
+      }
+      uint16_t dlo = bf16_bits_from_f32(rlo, rounding_mode);
+      if (pI->is_relu()) { rlo = relu_f32(rlo); rhi = relu_f32(rhi); }
+      uint16_t dhi = bf16_bits_from_f32(rhi, rounding_mode);
       data.u32 = (static_cast<uint32_t>(dhi) << 16) | static_cast<uint32_t>(dlo);
       break;
     }
@@ -3527,6 +3613,93 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     return;
   }
 
+  // cvt.{rn,rz}.bf16x2.f32: pack two f32 sources into one bf16x2.
+  // High 16 bits from src1, low 16 bits from src2 (same convention as f16x2).
+  if (to_type == BF16X2_TYPE && from_type == F32_TYPE) {
+    assert(pI->get_num_operands() >= 3 &&
+           "cvt.bf16x2.f32 requires 3 operands (dst, src1, src2).");
+    const std::vector<operand_info> &operands = pI->get_operands();
+    const operand_info &src2 = operands[2];
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t src2_data =
+        thread->get_operand_value(src2, dst, from_type, thread, 1);
+    if (rounding_mode != RN_OPTION && rounding_mode != RNI_OPTION &&
+        rounding_mode != RZ_OPTION && rounding_mode != RZI_OPTION) {
+      printf("GPGPU-Sim PTX: ERROR ** Unsupported rounding mode for cvt.bf16x2.f32\n");
+      printf("  Instruction: %s\n", pI->to_string().c_str());
+      printf("  Only .rn and .rz are supported\n");
+      abort();
+    }
+    uint16_t lo = bf16_bits_from_f32(src2_data.f32, rounding_mode);
+    uint16_t hi = bf16_bits_from_f32(src1_data.f32, rounding_mode);
+    ptx_reg_t result;
+    result.u32 = (static_cast<uint32_t>(hi) << 16) | static_cast<uint32_t>(lo);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // Scalar bf16 cvts. BF16 decodes to fmt 20 and BF16X2 to fmt 24, both beyond
+  // the 11x11 g_cvt_fn table, so they must be handled before indexing into it.
+  if (to_type == BF16_TYPE && from_type == F32_TYPE) {
+    if (rounding_mode != RN_OPTION && rounding_mode != RNI_OPTION &&
+        rounding_mode != RZ_OPTION && rounding_mode != RZI_OPTION &&
+        rounding_mode != RM_OPTION && rounding_mode != RMI_OPTION &&
+        rounding_mode != RP_OPTION && rounding_mode != RPI_OPTION) {
+      printf("GPGPU-Sim PTX: ERROR ** Unsupported rounding mode for cvt.bf16.f32\n");
+      printf("  Instruction: %s\n", pI->to_string().c_str());
+      abort();
+    }
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t result;
+    result.u32 = bf16_bits_from_f32(src1_data.f32, rounding_mode);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+  if (from_type == BF16_TYPE && to_type == F32_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t result;
+    result.u32 = (src1_data.u32 & 0xFFFFu) << 16;
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // Abort for other unimplemented conversions involving bf16 / bf16x2 instead
+  // of indexing g_cvt_fn out of bounds.
+  if (to_type == BF16_TYPE && from_type == S32_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t result;
+    result.u32 =
+        bf16_bits_from_f32(static_cast<float>(src1_data.s32), rounding_mode);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+  if (to_type == S32_TYPE && from_type == BF16_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    // cvt.rni.s32.bf16: bf16 -> s32, RN rounding.
+    float f = f32_from_bf16_bits(static_cast<uint16_t>(src1_data.u32 & 0xFFFFu));
+    ptx_reg_t result;
+    result.s32 = static_cast<int32_t>(std::nearbyint(f));
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  if (to_type == BF16_TYPE || from_type == BF16_TYPE ||
+      to_type == BF16X2_TYPE || from_type == BF16X2_TYPE) {
+    printf("GPGPU-Sim PTX: ERROR ** Unsupported cvt conversion involving bf16\n");
+    printf("  Instruction: %s\n", pI->to_string().c_str());
+    printf("  From type: %s, To type: %s\n", decode_token(from_type),
+           decode_token(to_type));
+    printf("  Only cvt.{rn,rz,rm,rp}.bf16x2.f32, cvt.{rn,rz,rm,rp}.bf16.f32, "
+           "cvt.f32.bf16, cvt.rn.bf16.s32 and cvt.rni.s32.bf16 are currently "
+           "supported\n");
+    abort();
+  }
+
   // Abort for other unimplemented conversions involving F16X2_TYPE
   if (to_type == F16X2_TYPE || from_type == F16X2_TYPE) {
     printf("GPGPU-Sim PTX: ERROR ** Unsupported cvt conversion involving f16x2\n");
@@ -3575,6 +3748,7 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       default:
         assert(0);
     }
+
   }
 
   if (g_cvt_fn[src_fmt][dst_fmt] != NULL) {
@@ -4717,6 +4891,31 @@ void mad_def(const ptx_instruction *pI, ptx_thread_info *thread,
       fesetround(orig_rm);
       break;
     }
+    case BF16_TYPE: {
+      float fa = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float fb = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float fc = f32_from_bf16_bits(static_cast<uint16_t>(c.u32 & 0xFFFFu));
+      float r = std::fma(fa, fb, fc);
+      if (pI->is_relu()) r = relu_f32(r);
+      d.u32 = bf16_bits_from_f32(r, RN_OPTION);
+      break;
+    }
+
+    case BF16X2_TYPE: {
+      float a_lo = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float a_hi = f32_from_bf16_bits(static_cast<uint16_t>((a.u32 >> 16) & 0xFFFFu));
+      float b_lo = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float b_hi = f32_from_bf16_bits(static_cast<uint16_t>((b.u32 >> 16) & 0xFFFFu));
+      float c_lo = f32_from_bf16_bits(static_cast<uint16_t>(c.u32 & 0xFFFFu));
+      float c_hi = f32_from_bf16_bits(static_cast<uint16_t>((c.u32 >> 16) & 0xFFFFu));
+      float r_lo = std::fma(a_lo, b_lo, c_lo);
+      float r_hi = std::fma(a_hi, b_hi, c_hi);
+      if (pI->is_relu()) { r_lo = relu_f32(r_lo); r_hi = relu_f32(r_hi); }
+      uint16_t d_lo = bf16_bits_from_f32(r_lo, RN_OPTION);
+      uint16_t d_hi = bf16_bits_from_f32(r_hi, RN_OPTION);
+      d.u32 = (static_cast<uint32_t>(d_hi) << 16) | static_cast<uint32_t>(d_lo);
+      break;
+    }
     case F32X2_TYPE: {
       // packed dual-f32 FMA: lo=bits[31:0], hi=bits[63:32]
       assert(use_carry == false);
@@ -4803,6 +5002,20 @@ void max_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case S64_TYPE:
       d.s64 = MY_MAX_I(a.s64, b.s64);
       break;
+    case BF16_TYPE: {
+      float fa = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float fb = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float fr = std::isnan(fa) ? fb : (std::isnan(fb) ? fa : (fa > fb ? fa : fb));
+      d.u32 = bf16_bits_from_f32(fr, RN_OPTION);
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float x, float y) {
+        return std::isnan(x) ? y : (std::isnan(y) ? x : (x > y ? x : y));
+      };
+      d.u32 = bf16x2_apply(a.u32, b.u32, RN_OPTION, +fn);
+      break;
+    }
     case F32_TYPE:
       d.f32 = MY_MAX_F(a.f32, b.f32);
       if (pI->get_num_operands() == 4) {
@@ -4857,6 +5070,20 @@ void min_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case S64_TYPE:
       d.s64 = MY_MIN_I(a.s64, b.s64);
       break;
+    case BF16_TYPE: {
+      float fa = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float fb = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float fr = std::isnan(fa) ? fb : (std::isnan(fb) ? fa : (fa < fb ? fa : fb));
+      d.u32 = bf16_bits_from_f32(fr, RN_OPTION);
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float x, float y) {
+        return std::isnan(x) ? y : (std::isnan(y) ? x : (x < y ? x : y));
+      };
+      d.u32 = bf16x2_apply(a.u32, b.u32, RN_OPTION, +fn);
+      break;
+    }
     case F32_TYPE:
       d.f32 = MY_MIN_F(a.f32, b.f32);
       if (pI->get_num_operands() == 4) {
@@ -5181,6 +5408,23 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       fesetround(orig_rm);
       break;
     }
+    case BF16_TYPE: {
+      float r = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu)) *
+                f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      if (pI->is_relu()) r = relu_f32(r);
+      d.u32 = bf16_bits_from_f32(r, rounding_mode);
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float a, float b) { return a * b; };
+      d.u32 = bf16x2_apply(a.u32, b.u32, rounding_mode, +fn);
+      if (pI->is_relu()) {
+        uint16_t lo = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(d.u32 & 0xFFFFu)), rounding_mode);
+        uint16_t hi = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(d.u32 >> 16)), rounding_mode);
+        d.u32 = (uint32_t(hi) << 16) | lo;
+      }
+      break;
+    }
     case F32X2_TYPE: {
       int orig_rm = fegetround();
       switch (rounding_mode) {
@@ -5264,6 +5508,12 @@ void neg_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case F16_TYPE:
       data.f16 = 0.0f - src1_data.f16;
       break;  // assert(0); break;
+    case BF16_TYPE:
+      data.u32 = (static_cast<uint32_t>(src1_data.u32) & 0xFFFFu) ^ 0x8000u;
+      break;
+    case BF16X2_TYPE:
+      data.u32 = src1_data.u32 ^ 0x80008000u;
+      break;
     case F32_TYPE:
       data.f32 = 0.0f - src1_data.f32;
       break;
@@ -6103,7 +6353,13 @@ void setp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   a = thread->get_operand_value(src1, dst, type, thread, 1);
   b = thread->get_operand_value(src2, dst, type, thread, 1);
 
-  t = CmpOp(type, a, b, cmpop);
+  if (type == BF16_TYPE) {
+    a.f32 = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+    b.f32 = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+    t = CmpOp(F32_TYPE, a, b, cmpop);
+  } else {
+    t = CmpOp(type, a, b, cmpop);
+  }
 
   ptx_reg_t data;
 
@@ -6131,6 +6387,26 @@ void set_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   a = thread->get_operand_value(src1, dst, src_type, thread, 1);
   b = thread->get_operand_value(src2, dst, src_type, thread, 1);
+
+  if (src_type == BF16X2_TYPE && pI->get_type() == BF16X2_TYPE) {
+    ptx_reg_t lo, hi;
+    lo.f32 = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+    hi.f32 = f32_from_bf16_bits(static_cast<uint16_t>((a.u32 >> 16) & 0xFFFFu));
+    ptx_reg_t blo, bhi;
+    blo.f32 = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+    bhi.f32 = f32_from_bf16_bits(static_cast<uint16_t>((b.u32 >> 16) & 0xFFFFu));
+    int t_lo = CmpOp(F32_TYPE, lo, blo, cmpop);
+    int t_hi = CmpOp(F32_TYPE, hi, bhi, cmpop);
+    ptx_reg_t data;
+    data.u32 = ((t_hi != 0) ? 0x3F800000u : 0u) | ((t_lo != 0) ? 0x3F80u : 0u);
+    thread->set_operand_value(dst, data, BF16X2_TYPE, thread, pI);
+    return;
+  }
+  if (src_type == BF16_TYPE) {
+    a.f32 = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+    b.f32 = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+    src_type = F32_TYPE;
+  }
 
   // Take abs of first operand if needed
   if (pI->is_abs()) {
@@ -6807,6 +7083,23 @@ void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case F16_TYPE:
       data.f16 = src1_data.f16 - src2_data.f16;
       break;  // assert(0); break;
+    case BF16_TYPE: {
+      float r = f32_from_bf16_bits(static_cast<uint16_t>(src1_data.u32 & 0xFFFFu)) -
+                f32_from_bf16_bits(static_cast<uint16_t>(src2_data.u32 & 0xFFFFu));
+      if (pI->is_relu()) r = relu_f32(r);
+      data.u32 = bf16_bits_from_f32(r, pI->rounding_mode());
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float a, float b) { return a - b; };
+      data.u32 = bf16x2_apply(src1_data.u32, src2_data.u32, pI->rounding_mode(), +fn);
+      if (pI->is_relu()) {
+        uint16_t lo = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(data.u32 & 0xFFFFu)), pI->rounding_mode());
+        uint16_t hi = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(data.u32 >> 16)), pI->rounding_mode());
+        data.u32 = (uint32_t(hi) << 16) | lo;
+      }
+      break;
+    }
     case F32X2_TYPE: {
       uint32_t s1lo = static_cast<uint32_t>(src1_data.u64 & 0xFFFFFFFFu);
       uint32_t s1hi = static_cast<uint32_t>(src1_data.u64 >> 32);

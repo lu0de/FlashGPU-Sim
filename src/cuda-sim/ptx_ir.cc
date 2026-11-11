@@ -1151,6 +1151,10 @@ unsigned type_info_key::type_decode(int type, size_t &size, int &basic_type) {
       size = 32;  // Two f16 values packed in 32 bits
       basic_type = -1;
       return 17;  // Use 17 to avoid conflict with PRED_TYPE (11) and other types
+    case BF16X2_TYPE:
+      size = 32;  // Two bf16 values packed in 32 bits
+      basic_type = -1;
+      return 24;  // 17-23 already used by F16X2/F32X2/B1/BF16/TF32/E4M3/E5M2
     case F32X2_TYPE:
       size = 64;  // two f32 values packed in 64 bits
       basic_type = -1;
@@ -1388,6 +1392,7 @@ ptx_instruction::ptx_instruction(
   m_exit = false;
   m_abs = false;
   m_neg = false;
+  m_relu = false;
   m_to_option = false;
   m_cache_option = 0;
   m_rounding_mode = RN_OPTION;
@@ -1670,6 +1675,9 @@ ptx_instruction::ptx_instruction(
         break;
       case ABS_OPTION:
         m_abs = true;
+        break;
+      case RELU_OPTION:
+        m_relu = true;
         break;
       case NEG_OPTION:
         m_neg = true;

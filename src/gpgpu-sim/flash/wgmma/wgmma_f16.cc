@@ -24,8 +24,9 @@ uint16_t packed_f16(const ptx_reg_t &reg, int half_index) {
 
 } // namespace
 
-void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
-                             warp_inst_t &inst) {
+static void wgmma_m64nXk16_16bit_impl(const ptx_instruction *pI, core_t *core,
+                                      warp_inst_t &inst,
+                                      float (*elem_to_f32)(uint16_t)) {
   constexpr int M = 64;
   constexpr int K = 16;
 
@@ -103,7 +104,7 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
               : wgmma_gmma_mn_major_smem_addr(b_desc, col, k, sizeof(uint16_t));
       representative_thread->m_shared_mem->read(b_smem_addr, sizeof(b_bits),
                                                 &b_bits);
-      B_mat[col * K + k] = scale_b * mma_f16_to_f32(b_bits);
+      B_mat[col * K + k] = scale_b * elem_to_f32(b_bits);
     }
   }
 
@@ -126,10 +127,9 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
         int row = tid_row + 16 * tid_m_block + 8 * reg_row_block;
         int k0 = 2 * tid_mma_col + 8 * reg_k_block;
 
-        A_mat[row * K + k0] =
-            scale_a * mma_f16_to_f32(packed_f16(a_regs[reg], 0));
+        A_mat[row * K + k0] = scale_a * elem_to_f32(packed_f16(a_regs[reg], 0));
         A_mat[row * K + k0 + 1] =
-            scale_a * mma_f16_to_f32(packed_f16(a_regs[reg], 1));
+            scale_a * elem_to_f32(packed_f16(a_regs[reg], 1));
       }
     }
   } else {
@@ -146,7 +146,7 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
                                                          sizeof(uint16_t));
         representative_thread->m_shared_mem->read(a_smem_addr, sizeof(a_bits),
                                                   &a_bits);
-        A_mat[row * K + k] = scale_a * mma_f16_to_f32(a_bits);
+        A_mat[row * K + k] = scale_a * elem_to_f32(a_bits);
       }
     }
   }
@@ -178,4 +178,13 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
   }
 }
 
+void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
+                             warp_inst_t &inst) {
+  wgmma_m64nXk16_16bit_impl(pI, core, inst, mma_f16_to_f32);
+}
+
+void wgmma_m64nXk16_bf16_impl(const ptx_instruction *pI, core_t *core,
+                              warp_inst_t &inst) {
+  wgmma_m64nXk16_16bit_impl(pI, core, inst, mma_bf16_to_f32);
+}
 } // namespace flash_gpgpu_sim

@@ -535,9 +535,10 @@ void tensor_wgmma_impl(const ptx_instruction *pI, core_t *core,
   }
 
   if (accumulator_type == F32_TYPE && a_type == BF16_TYPE &&
-      b_type == BF16_TYPE && pI->get_wgmma_shape_n() == 8 &&
+      b_type == BF16_TYPE && pI->get_wgmma_shape_n() >= 8 &&
+      pI->get_wgmma_shape_n() <= 256 && (pI->get_wgmma_shape_n() % 8) == 0 &&
       pI->get_wgmma_shape_k() == 16) {
-    wgmma_m64n8k16_bf16_impl(pI, core, inst);
+    wgmma_m64nXk16_bf16_impl(pI, core, inst);
     return;
   }
 
