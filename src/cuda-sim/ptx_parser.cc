@@ -651,9 +651,12 @@ void ptx_recognizer::add_scalar_type_spec(int type_spec) {
             (g_opcode == FMA_OP) ||
             (g_opcode == WGMMA_MMA_ASYNC_OP) ||
             (g_opcode == WGMMA_MMA_ASYNC_SP_OP) ||
-            (g_opcode == DP4A_OP) || (g_opcode == VMIN_OP) || (g_opcode == VMAX_OP),
-        "only cvt, set, slct, tex, mma, fma, wgmma, vmin, vmax and dp4a can have "
-        "more than one type specifier.");
+            (g_opcode == DP4A_OP) || (g_opcode == VMIN_OP) || (g_opcode == VMAX_OP) ||
+            (g_opcode == CLC_QUERY_CANCELED_OP) ||
+            (g_opcode == CLC_QUERY_FIRST_CTA_OP),
+        "only cvt, set, slct, tex, mma, fma, wgmma, vmin, vmax, dp4a and "
+        "clusterlaunchcontrol.query_cancel.is_canceled can have more than "
+        "one type specifier.");
   }
   g_scalar_type_spec = type_spec;
 }

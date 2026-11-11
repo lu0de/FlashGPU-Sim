@@ -614,10 +614,14 @@ ptx_reg_t ptx_thread_info::get_operand_value(const operand_info &op,
         result.u64 = (result.u64 >> 16) & 0xFFFF;
     } else if (opType == BB128_TYPE) {
       // b128
-      result.u128.lowest = get_reg(op.vec_symbol(0)).u32;
-      result.u128.low = get_reg(op.vec_symbol(1)).u32;
-      result.u128.high = get_reg(op.vec_symbol(2)).u32;
-      result.u128.highest = get_reg(op.vec_symbol(3)).u32;
+      if (op.is_vector()) {
+        result.u128.lowest = get_reg(op.vec_symbol(0)).u32;
+        result.u128.low = get_reg(op.vec_symbol(1)).u32;
+        result.u128.high = get_reg(op.vec_symbol(2)).u32;
+        result.u128.highest = get_reg(op.vec_symbol(3)).u32;
+      } else {
+        result = get_reg(op.get_symbol());
+      }
     } else {
       // bb64 or ff64
       result.bits.ls = get_reg(op.vec_symbol(0)).u32;
@@ -972,17 +976,22 @@ void ptx_thread_info::set_operand_value(const operand_info &dst,
       setValue3.u32 = data.u128.high;
       setValue4.u32 = data.u128.highest;
 
-      const symbol *name1, *name2, *name3, *name4 = NULL;
+      if (dst.is_vector()) {
+        const symbol *name1, *name2, *name3, *name4 = NULL;
 
-      name1 = dst.vec_symbol(0);
-      name2 = dst.vec_symbol(1);
-      name3 = dst.vec_symbol(2);
-      name4 = dst.vec_symbol(3);
+        name1 = dst.vec_symbol(0);
+        name2 = dst.vec_symbol(1);
+        name3 = dst.vec_symbol(2);
+        name4 = dst.vec_symbol(3);
 
-      set_reg(name1, setValue);
-      set_reg(name2, setValue2);
-      set_reg(name3, setValue3);
-      set_reg(name4, setValue4);
+        set_reg(name1, setValue);
+        set_reg(name2, setValue2);
+        set_reg(name3, setValue3);
+        set_reg(name4, setValue4);
+      } else {
+        setValue = data;
+        set_reg(dst.get_symbol(), setValue);
+      }
     } else if (type == BB64_TYPE || type == FF64_TYPE) {
       // ptxplus version of storing 64 bit values to registers stores to two
       // adjacent registers
@@ -2067,6 +2076,68 @@ void fence_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 void griddepcontrol_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   (void)pI;
   (void)thread;
+}
+
+// clusterlaunchcontrol.try_cancel: write the 16-byte cancellation
+// response (all zeros = nothing pending to cancel in this simulation) to
+// [dst] in shared::cta, then complete 16 tx bytes on the mbarrier.
+void clc_try_cancel_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  assert(pI->get_num_operands() == 2);
+  const operand_info &result_op = pI->dst();
+  const operand_info &mbarrier_op = pI->src1();
+  const uint32_t result_addr =
+      thread->get_operand_value(result_op, result_op, B32_TYPE, thread, 0).u32;
+  const uint32_t mbarrier_addr = thread
+      ->get_operand_value(mbarrier_op, mbarrier_op, B32_TYPE, thread, 0)
+      .u32;
+
+  // .multicast::cluster::all fans the response out to every CTA in the
+  // cluster; only single-CTA clusters are supported here.
+  for (int opt : pI->get_options()) {
+    if (opt == MULTICAST_CLUSTER_ALL_OPTION) {
+      unsigned n_ctas = thread->get_kernel().get_ctas_per_cluster();
+      if (n_ctas > 1) {
+        fprintf(stderr,
+                "GPGPU-Sim: clusterlaunchcontrol.try_cancel with "
+                ".multicast::cluster::all requires a multi-CTA cluster "
+                "(%u CTAs), which is not supported\n",
+                n_ctas);
+        abort();
+      }
+      break;
+    }
+  }
+
+  const ptx_reg_t result = {};
+  thread->m_shared_mem->write(result_addr, sizeof(result.u128), &result.u128,
+                              thread, pI);
+  thread->m_last_effective_address = result_addr;
+  thread->m_last_memory_space = shared_space;
+
+  inst_t::mbarrier_info_t info;
+  info.bar_id = mbarrier_addr;
+  info.bar_count = sizeof(result.u128);
+  const_cast<ptx_instruction *>(pI)->set_mbarrier_info(thread->get_laneid(),
+                                                     info);
+}
+
+void clc_query_canceled_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  ptx_reg_t predicate = {};
+  predicate.pred = 1; // ptxplus predicate encoding: one means false.
+  thread->set_operand_value(pI->dst(), predicate, PRED_TYPE, thread, pI);
+}
+
+void clc_query_first_cta_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  const operand_info &dst = pI->dst();
+  ptx_reg_t zero = {};
+  if (dst.is_vector()) {
+    for (unsigned i = 0; i < dst.get_vect_nelem(); ++i) {
+      const symbol *reg = dst.vec_symbol_or_null(i);
+      if (reg && reg->name() != "_") thread->set_reg(reg, zero);
+    }
+  } else {
+    thread->set_operand_value(dst, zero, B32_TYPE, thread, pI);
+  }
 }
 
 void elect_impl(const ptx_instruction *pI, core_t *core, warp_inst_t &inst) {

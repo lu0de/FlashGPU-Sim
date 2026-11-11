@@ -47,6 +47,7 @@ sources = [
   "unit/ptx_scheduler_test.cc",
   "unit/register_view_reload_test.cc",
   "unit/cvt_fp4_test.cu",
+  "unit/clc_test.cu",
   "unit/trace_config_test.cc",
   "unit/scoreboard_forwarding_test.cc",
   "unit/mbarrier_retry_timing_test.cc",

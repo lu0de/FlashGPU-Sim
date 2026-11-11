@@ -1327,6 +1327,8 @@ static std::list<operand_info> check_operands(
       (opcode == FMA_OP) ||
       (opcode == WGMMA_MMA_ASYNC_OP) ||
       (opcode == WGMMA_MMA_ASYNC_SP_OP) ||
+      (opcode == CLC_QUERY_CANCELED_OP) ||
+      (opcode == CLC_QUERY_FIRST_CTA_OP) ||
       (opcode == DP4A_OP) || (opcode == VMIN_OP) || (opcode == VMAX_OP)) {
     // just make sure these do not have have const operands...
     if (!g_warn_literal_operands_two_type_inst) {
@@ -1552,6 +1554,7 @@ ptx_instruction::ptx_instruction(
         m_parity_op = true;
         break;
       case TMA_MBAR_COMPLETE_BYTES:
+        if (opcode == CLC_TRY_CANCEL_OP) m_barrier_op = COMPLETE_TX_OPTION;
       case NOINC_OPTION:
       case COMMIT_GROUP_OPTION:
       case WAIT_GROUP_OPTION:
@@ -1766,6 +1769,7 @@ ptx_instruction::ptx_instruction(
       case BULK_GROUP_OPTION:
       case CLUSTER_OPTION:
       case MULTICAST_CLUSTER_OPTION:
+      case MULTICAST_CLUSTER_ALL_OPTION:
       case M8N8_OPTION:
       case MBARRIER_INIT_OPTION:
       case TRANS_OPTION:

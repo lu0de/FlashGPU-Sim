@@ -1496,6 +1496,7 @@ void ptx_instruction::set_opcode_and_latency() {
       op = BARRIER_OP;
       break;
     case MBAR_OP:
+    case CLC_TRY_CANCEL_OP:
       op = MBARRIER_OP;
       break;
     case TMA_OP:
