@@ -38,6 +38,7 @@ sources = [
   "wgmma/wgmma_b1_test.cu",
   "wgmma/wgmma_bf16_test.cu",
   "wgmma/wgmma_f16_test.cu",
+  "wgmma/wgmma_lowp_n_test.cu",
   "wgmma/wgmma_fp8_test.cu",
   "wgmma/wgmma_s8_test.cu",
   "wgmma/wgmma_tf32_test.cu",

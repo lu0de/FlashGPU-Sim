@@ -37,11 +37,11 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
                              warp_inst_t &inst);
 void wgmma_m64nXk16_bf16_impl(const ptx_instruction *pI, core_t *core,
                               warp_inst_t &inst);
-void wgmma_m64n8k8_tf32_impl(const ptx_instruction *pI, core_t *core,
+void wgmma_m64nXk8_tf32_impl(const ptx_instruction *pI, core_t *core,
                              warp_inst_t &inst);
-void wgmma_m64n8k32_fp8_impl(const ptx_instruction *pI, core_t *core,
+void wgmma_m64nXk32_fp8_impl(const ptx_instruction *pI, core_t *core,
                              warp_inst_t &inst, bool a_is_e4m3, bool b_is_e4m3);
-void wgmma_m64n8k32_int8_impl(const ptx_instruction *pI, core_t *core,
+void wgmma_m64nXk32_int8_impl(const ptx_instruction *pI, core_t *core,
                               warp_inst_t &inst, bool a_is_signed,
                               bool b_is_signed);
 void wgmma_m64n8k256_b1_impl(const ptx_instruction *pI, core_t *core,
