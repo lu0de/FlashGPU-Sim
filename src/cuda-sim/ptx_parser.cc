@@ -935,9 +935,59 @@ void ptx_recognizer::end_vector_operand() {
                              (g_scalar_type_spec == B64_TYPE ||
                               g_scalar_type_spec == B32_TYPE ||
                               g_scalar_type_spec == B16_TYPE);
-    parse_assert(is_store_source || is_mov_pack,
-                 "literal vector operands are only valid as store sources "
-                 "or mov.b64/mov.b32/mov.b16 pack sources.");
+    // MMA C operand form `{%r, 0., %r, 0.}` (and `0`/`0f00000000`): rewrite
+    // all-zero literal components to a shared read-only placeholder register
+    // that is never written (register file default is 0).
+    if (g_opcode == MMA_OP || g_opcode == TENSOR_MMA_OP) {
+      bool all_zero = true;
+      for (const operand_info &component : components) {
+        if (!component.is_literal()) continue;
+        const ptx_reg_t v = component.get_literal_value();
+        const bool zero =
+            (component.get_type() == float_op_t && v.f32 == 0.0f) ||
+            (component.get_type() == double_op_t && v.f64 == 0.0) ||
+            (component.get_type() == int_t && v.s64 == 0) ||
+            (component.get_type() == unsigned_t && v.u64 == 0);
+        if (!zero) all_zero = false;
+      }
+      if (all_zero) {
+        const type_info *ztype = NULL;
+        for (const operand_info &component : components) {
+          if (!component.is_literal() && component.get_symbol() != NULL &&
+              component.get_symbol()->type() != NULL) {
+            ztype = component.get_symbol()->type();
+            break;
+          }
+        }
+        if (ztype != NULL) {
+          const symbol *zsym = g_current_symbol_table->lookup("__lit_zero");
+          if (zsym == NULL) {
+            zsym = g_current_symbol_table->add_variable(
+                "__lit_zero", ztype,
+                scalar_type_bits(ztype->get_key().scalar_type()) / 8,
+                gpgpu_ctx->g_filename, ptx_get_lineno(scanner));
+            const_cast<symbol *>(zsym)
+                ->set_regno(g_current_symbol_table->next_reg_num(), -1);
+          }
+          for (std::list<operand_info>::iterator it = g_operands.begin();
+               it != g_operands.end(); ++it) {
+            int idx = static_cast<int>(
+                std::distance(g_operands.begin(), it));
+            if (idx >= g_vector_operand_start && it->is_literal())
+              *it = operand_info(zsym, gpgpu_ctx);
+          }
+          for (operand_info &component : components) {
+            if (component.is_literal())
+              component = operand_info(zsym, gpgpu_ctx);
+          }
+          has_literal = false;
+        }
+      }
+    }
+    if (has_literal)
+      parse_assert(is_store_source || is_mov_pack,
+                   "literal vector operands are only valid as store sources "
+                   "or mov.b64/mov.b32/mov.b16 pack sources.");
 
     if (is_mov_pack) {
       parse_assert(components.size() == 2,
@@ -962,7 +1012,7 @@ void ptx_recognizer::end_vector_operand() {
                           ? "mov.b16 pack register components must be 8 bits."
                           : "mov.b32 pack register components must be 16 bits."));
       }
-    } else {
+    } else if (has_literal) {
       const unsigned vector_width = vector_width_from_options(g_options);
       parse_assert(vector_width != 0,
                    "literal vector store requires a vector qualifier.");
