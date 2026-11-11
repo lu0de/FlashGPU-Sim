@@ -150,6 +150,7 @@ min     TC; yylval->int_value = MIN_OP; return OPCODE;
 mov     TC; yylval->int_value = MOV_OP; return OPCODE;
 mul24   TC; yylval->int_value = MUL24_OP; return OPCODE;
 mul     TC; yylval->int_value = MUL_OP; return OPCODE;
+neg/[ \t]*[,;] TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 neg     TC; yylval->int_value = NEG_OP; return OPCODE;
 nandn   TC; yylval->int_value = NANDN_OP; return OPCODE;
 norn    TC; yylval->int_value = NORN_OP; return OPCODE;
@@ -355,12 +356,14 @@ breakaddr  TC; yylval->int_value = BREAKADDR_OP; return OPCODE;
 "%warpid"  TC; yylval->int_value = WARPID_REG; return SPECIAL_REGISTER;
 "WARP_SZ"  TC; yylval->int_value = WARPSZ_REG; return SPECIAL_REGISTER;
 
+_/[ \t]*\|  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 _  TC; return UNDERSCORE;
 [a-zA-Z_][a-zA-Z0-9_$]*\.[xyzw]/[^a-zA-Z0-9_$]  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 [a-zA-Z_][a-zA-Z0-9_$]*  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 [$%][a-zA-Z0-9_$]+  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 
 [0-9]+\.[0-9]+ 	 TC; sscanf(yytext,"%lf", &yylval->double_value); return DOUBLE_OPERAND;
+[0-9]+\. 	TC; sscanf(yytext,"%lf", &yylval->double_value); return DOUBLE_OPERAND;
 	
 0[xX][0-9a-fA-F]+U? TC; yylval->int_value = (long long)strtoull(yytext, NULL, 0); return INT_OPERAND;
 0[0-7]+U?   	TC; printf("GPGPU-Sim: ERROR ** parsing octal not (yet) implemented\n"); abort(); return INT_OPERAND;

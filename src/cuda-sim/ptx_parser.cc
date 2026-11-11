@@ -757,6 +757,13 @@ void ptx_recognizer::add_2vector_operand(const char *d1, const char *d2) {
   PTX_PARSE_GPPRINTF("add_2vector_operand");
   const symbol *s1 = g_current_symbol_table->lookup(d1);
   const symbol *s2 = g_current_symbol_table->lookup(d2);
+  if (s1 == NULL && strcmp(d1, "_") == 0) {
+    // '_' write-discard pseudo operand used as vector component (e.g.
+    // `elect.sync _|%p`): declare a throwaway register like scalar '_'.
+    s1 = g_current_symbol_table->add_variable(d1, NULL, 0,
+                                              gpgpu_ctx->g_filename,
+                                              ptx_get_lineno(scanner));
+  }
   parse_assert(s1 != NULL && s2 != NULL,
                "v2 component(s) missing declarations.");
   g_operands.push_back(operand_info(s1, s2, NULL, NULL, gpgpu_ctx));
