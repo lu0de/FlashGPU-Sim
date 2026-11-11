@@ -172,6 +172,9 @@ void cuda_sim::ptx_opcocde_latency_options(option_parser_t opp) {
   option_parser_register(opp, "-ptx_opcode_latency_ex2", OPT_UINT32,
                          &opcode_latency_ex2,
                          "EX2 latency; 0 inherits SFU latency", "0");
+  option_parser_register(opp, "-ptx_opcode_initiation_ex2", OPT_UINT32,
+                         &opcode_initiation_ex2,
+                         "EX2 initiation interval; 0 inherits SFU initiation", "0");
   option_parser_register(opp, "-ptx_opcode_latency_predicate", OPT_UINT32,
                          &opcode_latency_predicate,
                          "SETP/SELP latency; 0 preserves legacy one-cycle ALU", "0");
@@ -1790,7 +1793,10 @@ void ptx_instruction::set_opcode_and_latency() {
       latency = sfu_latency;
       if (m_opcode == EX2_OP && gpgpu_ctx->func_sim->opcode_latency_ex2)
         latency = gpgpu_ctx->func_sim->opcode_latency_ex2;
-      initiation_interval = sfu_init;
+      initiation_interval =
+          (m_opcode == EX2_OP && gpgpu_ctx->func_sim->opcode_initiation_ex2)
+              ? gpgpu_ctx->func_sim->opcode_initiation_ex2
+              : sfu_init;
       op = SFU_OP;
       break;
     case WGMMA_MMA_ASYNC_OP:

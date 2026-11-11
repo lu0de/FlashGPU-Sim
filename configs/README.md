@@ -36,6 +36,21 @@ See the [B200 model notes](SM100_B200/README.md) for assumptions and limits.
 - **Clock domains (MHz):** `1080:1080:1155:3996`
   (core:interconnect:L2:DRAM)
 
+### SM103_B300
+
+See the [B300 model notes](SM103_B300/README.md) for the calibrated
+parameters and limits.
+
+[`SM103_B300`](SM103_B300/gpgpusim.config) models a B300 GPU with:
+
+- **Compute capability:** 10.0 (kept so that `sm_100a` PTX loads unchanged)
+- **Resources:** 148 SMs, 16 memory channels, and 192 L2/memory subpartitions
+- **Timing models:** Same as `SM100_B200`, with parameters calibrated on B300
+  hardware
+- **PTX transformation:** SASS-guided conservative instruction reordering
+- **Clock domains (MHz):** `2032:2032:1981:3996`
+  (core:interconnect:L2:DRAM)
+
 ### SM120_RTX5090
 
 See the [RTX 5090 model notes](SM120_RTX5090/README.md) for assumptions and limits.
