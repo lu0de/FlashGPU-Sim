@@ -3598,6 +3598,51 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     return;
   }
 
+  // cvt.rn.satfinite{,.relu}.e2m1x2.f32: pack two f32 sources into one
+  // packed fp4 pair (8-bit). src1 lands in the high nibble, src2 in the low.
+  if (to_type == E2M1X2_TYPE && from_type == F32_TYPE) {
+    assert(pI->get_num_operands() >= 3 &&
+           "cvt.e2m1x2.f32 requires 3 operands (dst, src1, src2).");
+    const std::vector<operand_info> &operands = pI->get_operands();
+    const operand_info &src2 = operands[2];
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t src2_data =
+        thread->get_operand_value(src2, dst, from_type, thread, 1);
+    float hi = src1_data.f32;
+    float lo = src2_data.f32;
+    if (pI->is_relu()) {
+      hi = std::signbit(hi) && !std::isnan(hi) ? 0.0f : hi;
+      lo = std::signbit(lo) && !std::isnan(lo) ? 0.0f : lo;
+    }
+    ptx_reg_t result;
+    result.u64 = 0;
+    result.u8 = (flash_gpgpu_sim::f32_to_e2m1(hi) << 4) |
+                flash_gpgpu_sim::f32_to_e2m1(lo);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // cvt.rn{,.relu}.f16x2.e2m1x2: low nibble -> low half, high nibble -> high.
+  if (to_type == F16X2_TYPE && from_type == E2M1X2_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    const bool relu = pI->is_relu();
+    auto decode_lane = [&](uint8_t nibble) -> uint16_t {
+      float f = flash_gpgpu_sim::e2m1_to_f32(nibble);
+      if (relu && std::signbit(f))
+        f = 0.0f;
+      return f16_bits_from_f32(f, RN_OPTION);
+    };
+    uint16_t lo16 = decode_lane(src1_data.u8 & 0xFu);
+    uint16_t hi16 = decode_lane((src1_data.u8 >> 4) & 0xFu);
+    ptx_reg_t result;
+    result.u32 =
+        (static_cast<uint32_t>(hi16) << 16) | static_cast<uint32_t>(lo16);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
   // cvt.rn{,.relu}.f16x2.{e4m3x2,e5m2x2}: low byte -> low half, high byte ->
   // high half.
   if (to_type == F16X2_TYPE &&

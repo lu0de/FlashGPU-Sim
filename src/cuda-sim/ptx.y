@@ -112,6 +112,7 @@ class ptx_recognizer;
 %token  E5M2_TYPE
 %token  E4M3X2_TYPE
 %token  E5M2X2_TYPE
+%token  E2M1X2_TYPE
 %token  F32_TYPE
 %token  F32X2_TYPE
 %token  F64_TYPE
@@ -551,6 +552,7 @@ scalar_type: S8_TYPE { recognizer->add_scalar_type_spec( S8_TYPE ); }
 	| E5M2_TYPE  { recognizer->add_scalar_type_spec( E5M2_TYPE ); }
 	| E4M3X2_TYPE { recognizer->add_scalar_type_spec( E4M3X2_TYPE ); }
 	| E5M2X2_TYPE { recognizer->add_scalar_type_spec( E5M2X2_TYPE ); }
+	| E2M1X2_TYPE { recognizer->add_scalar_type_spec( E2M1X2_TYPE ); }
 	| F32_TYPE   { recognizer->add_scalar_type_spec( F32_TYPE ); }
 	| F32X2_TYPE { recognizer->add_scalar_type_spec( F32X2_TYPE ); }
 	| F64_TYPE   { recognizer->add_scalar_type_spec( F64_TYPE ); }

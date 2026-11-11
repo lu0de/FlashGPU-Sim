@@ -4,6 +4,7 @@
 #ifndef FLASH_GPGPU_SIM_LOWP_FLOAT_H
 #define FLASH_GPGPU_SIM_LOWP_FLOAT_H
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -100,6 +101,43 @@ inline uint8_t f32_to_fp8(float value, bool is_e4m3) {
     return sign | static_cast<uint8_t>(is_e4m3 ? 0x7e : 0x7b);
   }
   return sign | static_cast<uint8_t>((encoded_exp << mantissa_bits) | mantissa);
+}
+
+// e2m1 (fp4): 1 sign, 2 exponent bits (bias 1), 1 mantissa bit.
+// Encodes 0..7 x sign: subnormal 0.5, normals {1,1.5,2,3,4,6}; no inf/nan.
+inline float e2m1_to_f32(uint8_t nibble) {
+  static const float lut[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+  float v = lut[nibble & 0x7];
+  return (nibble & 0x8) ? -v : v;
+}
+
+inline uint8_t f32_to_e2m1(float value) {
+  if (std::isnan(value))
+    return 0x07; // native: NaN encodes as the max-magnitude code
+  uint8_t sign = std::signbit(value) ? 0x08 : 0;
+  float m = std::fabs(value);
+  if (m > 6.0f || std::isinf(m))
+    m = 6.0f;
+  // RNE over the 8 representable magnitudes; ties pick the even code index.
+  static const float vals[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+  int best = 0, tiecode = 0;
+  float bd = INFINITY;
+  bool tie = false;
+  for (int c = 0; c < 8; ++c) {
+    float d = std::fabs(m - vals[c]);
+    if (d < bd) {
+      bd = d;
+      best = c;
+      tie = false;
+    } else if (d == bd) {
+      tiecode = c;
+      tie = true;
+    }
+  }
+  if (tie)
+    best = (std::min(best, tiecode) & 1) ? std::max(best, tiecode)
+                                         : std::min(best, tiecode);
+  return sign | static_cast<uint8_t>(best);
 }
 
 } // namespace flash_gpgpu_sim

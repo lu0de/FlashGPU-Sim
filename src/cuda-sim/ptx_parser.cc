@@ -606,6 +606,7 @@ void ptx_recognizer::add_scalar_type_spec(int type_spec) {
     case U8_TYPE:
     case E4M3_TYPE:
     case E5M2_TYPE:
+      case E2M1X2_TYPE:
       g_size = 1;
       break;
     case B16_TYPE:
@@ -857,7 +858,7 @@ bool is_float_scalar_type(int type) {
   return type == F16_TYPE || type == F32_TYPE || type == F64_TYPE ||
          type == FF64_TYPE || type == BF16_TYPE || type == TF32_TYPE ||
          type == E4M3_TYPE || type == E5M2_TYPE || type == E4M3X2_TYPE ||
-         type == E5M2X2_TYPE;
+         type == E5M2X2_TYPE || type == E2M1X2_TYPE;
 }
 
 unsigned scalar_type_bits(int type) {
@@ -895,15 +896,17 @@ void ptx_recognizer::end_vector_operand() {
         g_opcode == ST_OP && g_vector_operand_start == 1;
     const bool is_mov_pack = g_opcode == MOV_OP && g_vector_operand_start == 1 &&
                              (g_scalar_type_spec == B64_TYPE ||
-                              g_scalar_type_spec == B32_TYPE);
+                              g_scalar_type_spec == B32_TYPE ||
+                              g_scalar_type_spec == B16_TYPE);
     parse_assert(is_store_source || is_mov_pack,
                  "literal vector operands are only valid as store sources "
-                 "or mov.b64/mov.b32 pack sources.");
+                 "or mov.b64/mov.b32/mov.b16 pack sources.");
 
     if (is_mov_pack) {
       parse_assert(components.size() == 2,
                    "mov pack source requires two components.");
       const bool is_b64 = g_scalar_type_spec == B64_TYPE;
+      const bool is_b16 = g_scalar_type_spec == B16_TYPE;
       for (const operand_info &component : components) {
         if (component.is_literal()) {
           const enum operand_type type = component.get_type();
@@ -915,9 +918,12 @@ void ptx_recognizer::end_vector_operand() {
         parse_assert(symbol != NULL && symbol->type() != NULL,
                      "mov pack register component has no type.");
         const int register_type = symbol->type()->get_key().scalar_type();
-        parse_assert(scalar_type_bits(register_type) == (is_b64 ? 32 : 16),
-                     is_b64 ? "mov.b64 pack register components must be 32 bits."
-                            : "mov.b32 pack register components must be 16 bits.");
+        parse_assert(
+            scalar_type_bits(register_type) == (is_b64 ? 32 : (is_b16 ? 8 : 16)),
+            is_b64 ? "mov.b64 pack register components must be 32 bits."
+                   : (is_b16
+                          ? "mov.b16 pack register components must be 8 bits."
+                          : "mov.b32 pack register components must be 16 bits."));
       }
     } else {
       const unsigned vector_width = vector_width_from_options(g_options);
