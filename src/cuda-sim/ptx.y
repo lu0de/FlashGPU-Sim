@@ -67,6 +67,7 @@ class ptx_recognizer;
 %token  GLOBAL_DIRECTIVE
 %token  LOCAL_DIRECTIVE
 %token  LOC_DIRECTIVE
+%token  MAXCLUSTERRANK_DIRECTIVE
 %token  MAXNCTAPERSM_DIRECTIVE
 %token  MAXNNREG_DIRECTIVE
 %token  MAXNTID_DIRECTIVE
@@ -228,6 +229,7 @@ class ptx_recognizer;
 %token  CTA_OPTION
 %token  SYS_OPTION
 %token  SC_OPTION
+%token  ACQ_REL_OPTION
 %token  RELU_OPTION
 %token  EXIT_OPTION
 %token  ABS_OPTION
@@ -360,6 +362,7 @@ block_spec: MAXNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND {r
                                                                                 recognizer->maxnt_id($2, $4, $6);}
 	| MINNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".minnctapersm", $2); printf("GPGPU-Sim PTX: Warning: .minnctapersm ignored. \n"); }
 	| MAXNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxnctapersm", $2); printf("GPGPU-Sim PTX: Warning: .maxnctapersm ignored. \n"); }
+	| MAXCLUSTERRANK_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxclusterrank", $2); printf("GPGPU-Sim PTX: Warning: .maxclusterrank ignored. \n"); }
 	| REQNTID_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".reqntid", $2); printf("GPGPU-Sim PTX: Warning: .reqntid ignored. \n"); }
 	| REQNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND { recognizer->func_header_info_int(".reqntid", $2); printf("GPGPU-Sim PTX: Warning: .reqntid ignored. \n"); }
 	| EXPLICITCLUSTER_DIRECTIVE { recognizer->func_header_info(".explicitcluster"); recognizer->set_explicit_cluster(); }
@@ -669,6 +672,7 @@ option: type_spec
 	| CTA_OPTION { recognizer->add_option(CTA_OPTION); }
 	| SYS_OPTION { recognizer->add_option(SYS_OPTION); }
 	| SC_OPTION { recognizer->add_option(SC_OPTION); }
+	| ACQ_REL_OPTION { recognizer->add_option(ACQ_REL_OPTION); }
 	| GEOM_MODIFIER_1D { recognizer->add_option(GEOM_MODIFIER_1D); }
 	| GEOM_MODIFIER_2D { recognizer->add_option(GEOM_MODIFIER_2D); }
 	| GEOM_MODIFIER_3D { recognizer->add_option(GEOM_MODIFIER_3D); }

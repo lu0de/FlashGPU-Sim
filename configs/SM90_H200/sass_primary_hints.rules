@@ -33,6 +33,10 @@ cvt.rn.bf16x2.f32 = F2FP.BF16.F32.PACK_AB
 cvt.rz.bf16x2.f32 = F2FP.BF16.F32.PACK_AB.RZ
 cvt.rn.bf16.f32 = F2F.BF16.F32, F2FP.BF16.F32.PACK_AB
 cvt.rz.bf16.f32 = F2F.BF16.F32.RZ
+fence.acq_rel.cta = MEMBAR.ALL.CTA
+fence.acq_rel.cluster = MEMBAR.ALL.GPU
+fence.acq_rel.gpu = MEMBAR.ALL.GPU
+fence.acq_rel.sys = MEMBAR.ALL.SYS
 
 [attached_opcode_allowlist]
 # These were observed as non-primary SASS sharing a PTX line with one of the

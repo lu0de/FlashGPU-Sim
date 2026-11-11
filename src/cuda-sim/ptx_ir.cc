@@ -1680,6 +1680,9 @@ ptx_instruction::ptx_instruction(
       case SC_OPTION:
         // fence.sc.* : sequential-consistency order; scope is a later option.
         break;
+      case ACQ_REL_OPTION:
+        // fence.acq_rel.* : acquire-release order; same no-op classification as fence.sc.
+        break;
       case FTZ_OPTION:
         break;
       case EXIT_OPTION:

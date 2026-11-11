@@ -958,6 +958,7 @@ void ptx_instruction::set_fp_or_int_archop() {
       (m_opcode == NOP_OP) || (m_opcode == EXIT_OP) || (m_opcode == CALLP_OP) ||
       (m_opcode == CALL_OP) || (m_opcode == TENSORMAP_OP) || (m_opcode == FENCE_OP) ||
       (m_opcode == GRIDDEPCONTROL_OP) || (m_opcode == ELECT_OP) ||
+      (m_opcode == TRAP_OP) ||
       (m_opcode == LDMATRIX_OP) || (m_opcode == STMATRIX_OP) ||
       (m_opcode == CP_ASYNC_OP) || (m_opcode == CP_ASYNC_COMMIT_OP) ||
       (m_opcode == CP_ASYNC_WAIT_OP) ||
@@ -999,6 +1000,7 @@ void ptx_instruction::set_mul_div_or_other_archop() {
       (m_opcode != RETP_OP) && (m_opcode != RET_OP) && (m_opcode != CALLP_OP) &&
       (m_opcode != CALL_OP) && (m_opcode != TENSORMAP_OP) && (m_opcode != FENCE_OP) &&
       (m_opcode != GRIDDEPCONTROL_OP) && (m_opcode != ELECT_OP) &&
+      (m_opcode != TRAP_OP) &&
       (m_opcode != LDMATRIX_OP) && (m_opcode != STMATRIX_OP) &&
       (m_opcode != CP_ASYNC_OP) && (m_opcode != CP_ASYNC_COMMIT_OP) &&
       (m_opcode != CP_ASYNC_WAIT_OP) &&
@@ -1553,7 +1555,8 @@ void ptx_instruction::set_opcode_and_latency() {
         op = TENSOR_MAP_OP;
         latency = tensormap_latency[2];
         initiation_interval = tensormap_init[2];
-      } else if (std::find(opts.begin(), opts.end(), SC_OPTION) != opts.end()) {
+      } else if (std::find(opts.begin(), opts.end(), SC_OPTION) != opts.end() ||
+                 std::find(opts.begin(), opts.end(), ACQ_REL_OPTION) != opts.end()) {
         op = MEMORY_BARRIER_OP;
       }
       break;

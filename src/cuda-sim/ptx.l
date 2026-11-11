@@ -278,6 +278,7 @@ breakaddr  TC; yylval->int_value = BREAKADDR_OP; return OPCODE;
 \.local  TC; return LOCAL_DIRECTIVE;
 \.loc[ \t][^\n]*  TC; /* skip .loc debug directive */
 \.maxnctapersm TC; return MAXNCTAPERSM_DIRECTIVE;
+\.maxclusterrank TC; return MAXCLUSTERRANK_DIRECTIVE;
 \.maxnreg TC; return MAXNNREG_DIRECTIVE;
 \.maxntid TC; return MAXNTID_DIRECTIVE;
 \.minnctapersm TC; return MINNCTAPERSM_DIRECTIVE;
@@ -473,6 +474,7 @@ breakaddr  TC; yylval->int_value = BREAKADDR_OP; return OPCODE;
 \.cta   TC; return CTA_OPTION;
 \.sys   TC; return SYS_OPTION;
 \.sc    TC; return SC_OPTION;
+\.acq_rel TC; return ACQ_REL_OPTION;
 
 \.exit   TC; return EXIT_OPTION;
 
