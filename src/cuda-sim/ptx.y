@@ -337,6 +337,7 @@ class ptx_recognizer;
 %token	TCGEN05_UNPACK_16B_OPTION;
 %token	TCGEN05_BEFORE_THREAD_SYNC_OPTION;
 %token	TCGEN05_AFTER_THREAD_SYNC_OPTION;
+%token	TCGEN05_COLLECTOR_OPTION;
 %token	TCGEN05_WAIT_LD_OPTION;
 %token	TCGEN05_WAIT_ST_OPTION;
 %type <int_value> function_decl_header
@@ -798,6 +799,7 @@ option: type_spec
 	| TCGEN05_UNPACK_16B_OPTION { recognizer->add_option(TCGEN05_UNPACK_16B_OPTION); }
 	| TCGEN05_BEFORE_THREAD_SYNC_OPTION { recognizer->add_option(TCGEN05_BEFORE_THREAD_SYNC_OPTION); }
 	| TCGEN05_AFTER_THREAD_SYNC_OPTION { recognizer->add_option(TCGEN05_AFTER_THREAD_SYNC_OPTION); }
+	| TCGEN05_COLLECTOR_OPTION { recognizer->add_option(TCGEN05_COLLECTOR_OPTION); }
 	;
 
 atomic_operation_spec: ATOMIC_AND { recognizer->add_option(ATOMIC_AND); }

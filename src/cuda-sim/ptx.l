@@ -48,11 +48,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define LINEBUF_SIZE (4*1024)
 #define TC recognizer->col+=strlen(yytext);
-#define CHECK_UNSIGNED \
-	if( yytext[strlen(yytext)-1]=='U' ) { \
-		printf("GPGPU-Sim: ERROR ** U modifier not implemented\n"); \
-		abort(); \
-	}
 #define YY_DECL int ptx_lex \
 	       (YYSTYPE * yylval_param , yyscan_t yyscanner, ptx_recognizer* recognizer)
 int ptx_error( yyscan_t yyscanner, ptx_recognizer* recognizer, const char *s );
@@ -142,6 +137,7 @@ ld      TC; yylval->int_value = LD_OP; return OPCODE;
 ld.volatile TC; yylval->int_value = LD_OP; return OPCODE;
 ldu     TC; yylval->int_value = LDU_OP; return OPCODE;
 lg2	TC; yylval->int_value = LG2_OP; return OPCODE;
+lop3	TC; yylval->int_value = LOP3_OP; return OPCODE;
 griddepcontrol TC; yylval->int_value = GRIDDEPCONTROL_OP; return OPCODE;
 mad24   TC; yylval->int_value = MAD24_OP; return OPCODE;
 mad     TC; yylval->int_value = MAD_OP; return OPCODE;
@@ -167,6 +163,7 @@ prefetchu TC; yylval->int_value = PREFETCHU_OP; return OPCODE;
 prmt    TC; yylval->int_value = PRMT_OP; return OPCODE;
 rcp	TC; yylval->int_value = RCP_OP; return OPCODE;
 red     TC; yylval->int_value = RED_OP; return OPCODE;
+redux   TC; yylval->int_value = REDUX_OP; return OPCODE;
 rem	TC; yylval->int_value = REM_OP; return OPCODE;
 ret	TC; yylval->int_value = RET_OP; return OPCODE;
 retp     TC; yylval->int_value = RETP_OP; return OPCODE;
@@ -359,15 +356,16 @@ breakaddr  TC; yylval->int_value = BREAKADDR_OP; return OPCODE;
 "WARP_SZ"  TC; yylval->int_value = WARPSZ_REG; return SPECIAL_REGISTER;
 
 _  TC; return UNDERSCORE;
+[a-zA-Z_][a-zA-Z0-9_$]*\.[xyzw]/[^a-zA-Z0-9_$]  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 [a-zA-Z_][a-zA-Z0-9_$]*  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 [$%][a-zA-Z0-9_$]+  TC; yylval->string_value = strdup(yytext); return IDENTIFIER;
 
 [0-9]+\.[0-9]+ 	 TC; sscanf(yytext,"%lf", &yylval->double_value); return DOUBLE_OPERAND;
 	
-0[xX][0-9a-fA-F]+U? TC; CHECK_UNSIGNED; yylval->int_value = (long long)strtoull(yytext, NULL, 0); return INT_OPERAND;
+0[xX][0-9a-fA-F]+U? TC; yylval->int_value = (long long)strtoull(yytext, NULL, 0); return INT_OPERAND;
 0[0-7]+U?   	TC; printf("GPGPU-Sim: ERROR ** parsing octal not (yet) implemented\n"); abort(); return INT_OPERAND;
 0[bB][01]+U?  	TC; printf("GPGPU-Sim: ERROR ** parsing binary not (yet) implemented\n"); abort(); return INT_OPERAND;
-[-]?[0-9]+U?    TC; CHECK_UNSIGNED; yylval->int_value = strtoll(yytext, NULL, 10); return INT_OPERAND;
+[-]?[0-9]+U?    TC; yylval->int_value = strtoll(yytext, NULL, 10); return INT_OPERAND;
 
 0[fF][0-9a-fA-F]{8}  TC; sscanf(yytext+2,"%x", (unsigned*)(void*)&yylval->float_value); return FLOAT_OPERAND;
 0[dD][0-9a-fA-F]{16}  TC; sscanf(yytext+2,"%Lx", (unsigned long long*)(void*)&yylval->double_value); return DOUBLE_OPERAND;
@@ -532,6 +530,12 @@ _  TC; return UNDERSCORE;
 ::after_thread_sync TC; return TCGEN05_AFTER_THREAD_SYNC_OPTION;
 \.before_thread_sync TC; return TCGEN05_BEFORE_THREAD_SYNC_OPTION;
 \.after_thread_sync TC; return TCGEN05_AFTER_THREAD_SYNC_OPTION;
+\.collector::a::discard TC; return TCGEN05_COLLECTOR_OPTION;
+\.collector::b::discard TC; return TCGEN05_COLLECTOR_OPTION;
+\.collector::a::fill TC; return TCGEN05_COLLECTOR_OPTION;
+\.collector::b::fill TC; return TCGEN05_COLLECTOR_OPTION;
+\.collector::a::lastuse TC; return TCGEN05_COLLECTOR_OPTION;
+\.collector::b::lastuse TC; return TCGEN05_COLLECTOR_OPTION;
 \.try_wait TC; return TRY_WAIT_OPTION;
 \.test_wait TC; return TEST_WAIT_OPTION;
 \.wait TC; return WAIT_OPTION;

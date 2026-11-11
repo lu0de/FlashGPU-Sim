@@ -393,6 +393,33 @@ void ptx_recognizer::add_identifier(const char *identifier, int array_dim,
         arch_regnum = 0;
       }
       g_last_symbol->set_regno(regnum, arch_regnum);
+
+      // Vector register component aliases: declaring `.reg .v2/.v4 .type mx;`
+      // also declares the scalar symbols mx.x/.y(/.z/.w), used by inline-asm
+      // component access such as `max.f32 mx.x, %f1, %f2;`.
+      int vwidth = 0;
+      for (std::list<int>::const_iterator o = g_options.begin();
+           o != g_options.end(); ++o) {
+        if (*o == V2_TYPE) vwidth = 2;
+        if (*o == V3_TYPE) vwidth = 3;
+        if (*o == V4_TYPE) vwidth = 4;
+      }
+      if (vwidth >= 2 && g_scalar_type_spec != -1) {
+        static const char comp_name[] = {'x', 'y', 'z', 'w'};
+        type_info *comp_type = g_current_symbol_table->add_type(
+            g_space_spec, g_scalar_type_spec, -1, g_alignment_spec,
+            g_extern_spec);
+        for (int c = 0; c < vwidth; ++c) {
+          std::string cname =
+              std::string(identifier) + "." + comp_name[c];
+          if (!check_for_duplicates(cname.c_str())) {
+            symbol *comp_sym = g_current_symbol_table->add_variable(
+                strdup(cname.c_str()), comp_type, num_bits / 8 / vwidth,
+                gpgpu_ctx->g_filename, ptx_get_lineno(scanner));
+            comp_sym->set_regno(g_current_symbol_table->next_reg_num(), -1);
+          }
+        }
+      }
     } break;
     case shared_space:
       printf("GPGPU-Sim PTX: allocating shared region for \"%s\" ", identifier);

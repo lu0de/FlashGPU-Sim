@@ -4106,6 +4106,39 @@ void div_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
   ptx_reg_t src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
+  // Integer divide by zero returns all-ones on NVIDIA hardware rather than
+  // raising SIGFPE.
+  bool int_divisor_zero = false;
+  switch (i_type) {
+    case S8_TYPE:
+    case U8_TYPE:
+    case B8_TYPE:
+      int_divisor_zero = (src2_data.u8 == 0);
+      break;
+    case S16_TYPE:
+    case U16_TYPE:
+    case B16_TYPE:
+      int_divisor_zero = (src2_data.u16 == 0);
+      break;
+    case S32_TYPE:
+    case U32_TYPE:
+    case B32_TYPE:
+      int_divisor_zero = (src2_data.u32 == 0);
+      break;
+    case S64_TYPE:
+    case U64_TYPE:
+    case B64_TYPE:
+      int_divisor_zero = (src2_data.u64 == 0);
+      break;
+    default:
+      break;
+  }
+  if (int_divisor_zero) {
+    data.u64 = 0xFFFFFFFFFFFFFFFFULL;
+    thread->set_operand_value(dst, data, i_type, thread, pI);
+    return;
+  }
+
   switch (i_type) {
     case S8_TYPE:
       data.s8 = src1_data.s8 / src2_data.s8;
@@ -6122,6 +6155,26 @@ void rem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
+  // Integer remainder by zero returns the dividend on NVIDIA hardware rather
+  // than raising SIGFPE.
+  bool int_divisor_zero = false;
+  switch (i_type) {
+    case S32_TYPE:
+    case U32_TYPE:
+      int_divisor_zero = (src2_data.u32 == 0);
+      break;
+    case S64_TYPE:
+    case U64_TYPE:
+      int_divisor_zero = (src2_data.u64 == 0);
+      break;
+    default:
+      break;
+  }
+  if (int_divisor_zero) {
+    thread->set_operand_value(dst, src1_data, i_type, thread, pI);
+    return;
+  }
+
   switch (i_type) {
     case S32_TYPE:
       data.s32 = src1_data.s32 % src2_data.s32;
@@ -8011,6 +8064,163 @@ void activemask_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   const operand_info &dst = pI->dst();
   thread->set_operand_value(dst, l_activemask_uint, U32_TYPE, thread, pI);
+}
+
+void lop3_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  ptx_reg_t src1_data, src2_data, src3_data, src4_data, data;
+
+  const operand_info &dst = pI->dst();
+  const operand_info &src1 = pI->src1();
+  const operand_info &src2 = pI->src2();
+  const operand_info &src3 = pI->src3();
+  const operand_info &src4 = pI->src4();
+
+  unsigned i_type = pI->get_type();
+  src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
+  src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
+  src3_data = thread->get_operand_value(src3, dst, i_type, thread, 1);
+  src4_data = thread->get_operand_value(src4, dst, i_type, thread, 1);
+
+  // 3-input logic function: per-bit index (a<<2)|(b<<1)|c into the 8-bit LUT.
+  unsigned a = src1_data.u32;
+  unsigned b = src2_data.u32;
+  unsigned c = src3_data.u32;
+  unsigned lut = src4_data.u32 & 0xFF;
+  unsigned r = 0;
+  for (int i = 0; i < 32; ++i) {
+    unsigned idx = (((a >> i) & 1) << 2) | (((b >> i) & 1) << 1) | ((c >> i) & 1);
+    r |= ((lut >> idx) & 1) << i;
+  }
+  data.u64 = r;
+  thread->set_operand_value(dst, data, i_type, thread, pI);
+}
+
+void redux_impl(const ptx_instruction *pI, core_t *core, warp_inst_t inst) {
+  // redux.sync.op.type d, a, membermask; -- warp reduction across the lanes
+  // named by membermask (like shfl, this is modeled as a whole-warp op).
+  unsigned i_type = pI->get_type();
+  int tid;
+  if (core->get_gpu()->is_functional_sim())
+    tid = inst.warp_id_func() * core->get_warp_size();
+  else
+    tid = inst.warp_id() * core->get_warp_size();
+
+  int lane = inst.current_lane();
+  ptx_thread_info *thread = core->get_thread_info()[tid + lane];
+
+  const operand_info &dst = pI->dst();
+  const operand_info &src1 = pI->src1();
+  const operand_info &src2 = pI->src2();
+  unsigned membermask =
+      (thread->get_operand_value(src2, dst, U32_TYPE, thread, 1)).u32;
+
+  int redux_op = ATOMIC_ADD;
+  bool use_nan = false;
+  bool use_abs = false;
+  for (int opt : pI->get_options()) {
+    switch (opt) {
+      case ATOMIC_ADD:
+      case ATOMIC_MIN:
+      case ATOMIC_MAX:
+      case ATOMIC_AND:
+      case ATOMIC_OR:
+      case ATOMIC_XOR:
+        redux_op = opt;
+        break;
+      case NAN_OPTION:
+        use_nan = true;
+        break;
+      case ABS_OPTION:
+        use_abs = true;
+        break;
+      default:
+        break;
+    }
+  }
+
+  bool is_f32 = (i_type == F32_TYPE);
+  bool first = true;
+  float facc = 0.0f;
+  int sacc = 0;
+  unsigned uacc = 0;
+  unsigned warp_sz = core->get_warp_size();
+
+  for (unsigned l = 0; l < warp_sz && l < 32; ++l) {
+    if (!(membermask & (1u << l)) || !inst.active(l)) continue;
+    ptx_thread_info *src = core->get_thread_info()[tid + l];
+    ptx_reg_t v = src->get_operand_value(src1, dst, i_type, src, 1);
+    if (is_f32) {
+      float f = v.f32;
+      if (use_abs) f = fabsf(f);
+      if (first) {
+        facc = f;
+      } else {
+        switch (redux_op) {
+          case ATOMIC_ADD:
+            facc = facc + f;
+            break;
+          case ATOMIC_MIN:
+            facc = (use_nan && (isnan(facc) || isnan(f))) ? NAN
+                                                        : fminf(facc, f);
+            break;
+          case ATOMIC_MAX:
+            facc = (use_nan && (isnan(facc) || isnan(f))) ? NAN
+                                                        : fmaxf(facc, f);
+            break;
+          default:
+            printf("GPGPU-Sim PTX: ERROR: redux f32 supports add/min/max\n");
+            assert(0);
+        }
+      }
+    } else if (i_type == S32_TYPE) {
+      int x = v.s32;
+      if (use_abs) x = abs(x);
+      if (first) {
+        sacc = x;
+      } else {
+        switch (redux_op) {
+          case ATOMIC_ADD: sacc += x; break;
+          case ATOMIC_MIN: sacc = x < sacc ? x : sacc; break;
+          case ATOMIC_MAX: sacc = x > sacc ? x : sacc; break;
+          case ATOMIC_AND: sacc &= x; break;
+          case ATOMIC_OR: sacc |= x; break;
+          case ATOMIC_XOR: sacc ^= x; break;
+          default: assert(0);
+        }
+      }
+    } else {
+      unsigned x = v.u32;
+      if (first) {
+        uacc = x;
+      } else {
+        switch (redux_op) {
+          case ATOMIC_ADD: uacc += x; break;
+          case ATOMIC_MIN: uacc = x < uacc ? x : uacc; break;
+          case ATOMIC_MAX: uacc = x > uacc ? x : uacc; break;
+          case ATOMIC_AND: uacc &= x; break;
+          case ATOMIC_OR: uacc |= x; break;
+          case ATOMIC_XOR: uacc ^= x; break;
+          default: assert(0);
+        }
+      }
+    }
+    first = false;
+  }
+
+  ptx_reg_t data;
+  if (is_f32)
+    data.f32 = facc;
+  else if (i_type == S32_TYPE)
+    data.s32 = sacc;
+  else
+    data.u32 = uacc;
+
+  // Every lane in membermask receives the result.
+  for (unsigned l = 0; l < warp_sz && l < 32; ++l) {
+    if (!(membermask & (1u << l)) || !inst.active(l)) continue;
+    ptx_thread_info *t = core->get_thread_info()[tid + l];
+    t->set_operand_value(dst, data, i_type, t, pI);
+  }
 }
 
 void xor_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
