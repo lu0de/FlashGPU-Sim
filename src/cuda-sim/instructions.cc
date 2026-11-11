@@ -2420,10 +2420,24 @@ void bfind_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     }
   }
 
-  // if (.shiftamt && d != 0xffffffff)  { d = msb - d; }
+  if (d_data != 0xffffffff) {
+    for (int opt : pI->get_options()) {
+      if (opt == SHIFTAMT_OPTION) {
+        d_data = msb - d_data;
+        break;
+      }
+    }
+  }
 
   // store d
   thread->set_operand_value(dst, d_data, U32_TYPE, thread, pI);
+}
+
+void createpolicy_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  // Cache-eviction policy descriptor: simulator models no eviction policy,
+  // so materialize a constant placeholder into the destination register.
+  const operand_info &dst = pI->dst();
+  thread->set_operand_value(dst, (unsigned long long)0, U64_TYPE, thread, pI);
 }
 
 void bra_impl(const ptx_instruction *pI, ptx_thread_info *thread) {

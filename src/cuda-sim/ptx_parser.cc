@@ -1149,6 +1149,11 @@ void ptx_recognizer::add_literal_double(double value) {
 void ptx_recognizer::add_scalar_operand(const char *identifier) {
   PTX_PARSE_GPPRINTF("add_scalar_operand");
   const symbol *s = g_current_symbol_table->lookup(identifier);
+  if (s == NULL && strcmp(identifier, "_") == 0) {
+    // PTX '_' write-discard pseudo operand: declare a throwaway register.
+    s = g_current_symbol_table->add_variable(
+        identifier, NULL, 0, gpgpu_ctx->g_filename, ptx_get_lineno(scanner));
+  }
   if (s == NULL) {
     if (g_opcode == BRA_OP || g_opcode == CALLP_OP) {
       // forward branch target...

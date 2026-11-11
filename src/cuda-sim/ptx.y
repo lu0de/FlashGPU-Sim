@@ -281,6 +281,13 @@ class ptx_recognizer;
 %token	GPU_OPTION;
 %token	L2_CACHE_HINT_OPTION;
 %token	L2_OPTION;
+%token	FRACTIONAL_OPTION;
+%token	EVICT_OPTION;
+%token	SHIFTAMT_OPTION;
+%token	X8_OPTION;
+%token	X64_OPTION;
+%token	X128_OPTION;
+%token	UNDERSCORE;
 %token	ALIGNED_OPTION;
 %token	B1024_TYPE;
 %token	GENERIC_OPTION;
@@ -361,8 +368,10 @@ block_spec: MAXNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND {r
 										recognizer->func_header_info_int(",", $4);
 										recognizer->func_header_info_int(",", $6);
                                                                                 recognizer->maxnt_id($2, $4, $6);}
+	| MAXNTID_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxntid", $2); recognizer->maxnt_id($2, 1, 1); printf("GPGPU-Sim PTX: Warning: .maxntid single-dim form. \n"); }
 	| MINNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".minnctapersm", $2); printf("GPGPU-Sim PTX: Warning: .minnctapersm ignored. \n"); }
 	| MAXNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxnctapersm", $2); printf("GPGPU-Sim PTX: Warning: .maxnctapersm ignored. \n"); }
+	| MAXNNREG_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxnreg", $2); printf("GPGPU-Sim PTX: Warning: .maxnreg ignored. \n"); }
 	| MAXCLUSTERRANK_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxclusterrank", $2); printf("GPGPU-Sim PTX: Warning: .maxclusterrank ignored. \n"); }
 	| REQNTID_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".reqntid", $2); printf("GPGPU-Sim PTX: Warning: .reqntid ignored. \n"); }
 	| REQNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND { recognizer->func_header_info_int(".reqntid", $2); printf("GPGPU-Sim PTX: Warning: .reqntid ignored. \n"); }
@@ -733,6 +742,12 @@ option: type_spec
 	| GPU_OPTION { recognizer->add_option(GPU_OPTION); }
 	| L2_CACHE_HINT_OPTION { recognizer->add_option(L2_CACHE_HINT_OPTION); }
 	| L2_OPTION { recognizer->add_option(L2_OPTION); }
+	| FRACTIONAL_OPTION { recognizer->add_option(FRACTIONAL_OPTION); }
+	| EVICT_OPTION { recognizer->add_option(EVICT_OPTION); }
+	| SHIFTAMT_OPTION { recognizer->add_option(SHIFTAMT_OPTION); }
+	| X8_OPTION { recognizer->add_option(X8_OPTION); }
+	| X64_OPTION { recognizer->add_option(X64_OPTION); }
+	| X128_OPTION { recognizer->add_option(X128_OPTION); }
 	| ALIGNED_OPTION { recognizer->add_option(ALIGNED_OPTION); }
 	| B1024_TYPE { recognizer->add_option(B1024_TYPE); }
 	| GENERIC_OPTION { recognizer->add_option(GENERIC_OPTION); }
@@ -857,6 +872,7 @@ operand_list: operand
 	| operand COMMA operand_list;
 
 operand: IDENTIFIER  { recognizer->add_scalar_operand( $1 ); }
+	| UNDERSCORE { recognizer->add_scalar_operand( "_" ); }
 	| EXCLAMATION IDENTIFIER { recognizer->add_neg_pred_operand( $2 ); }
 	| MINUS IDENTIFIER  { recognizer->add_scalar_operand( $2 ); recognizer->change_operand_neg(); }
 	| memory_operand
@@ -885,6 +901,7 @@ vector_operand: LEFT_BRACE { recognizer->begin_vector_operand(); }
 	;
 
 vector_component: IDENTIFIER { recognizer->add_scalar_operand($1); }
+		| UNDERSCORE { recognizer->add_scalar_operand("_"); }
 		| INT_OPERAND { recognizer->add_literal_int($1); }
 		| FLOAT_OPERAND { recognizer->add_literal_float($1); }
 		| DOUBLE_OPERAND { recognizer->add_literal_double($1); }

@@ -1808,6 +1808,12 @@ ptx_instruction::ptx_instruction(
       case TCGEN05_AFTER_THREAD_SYNC_OPTION:
       case TCGEN05_WAIT_LD_OPTION:
       case TCGEN05_WAIT_ST_OPTION:
+      case FRACTIONAL_OPTION:
+      case EVICT_OPTION:
+      case SHIFTAMT_OPTION:
+      case X8_OPTION:
+      case X64_OPTION:
+      case X128_OPTION:
         break;
       default:
         printf("Error: Unsupported PTX instruction option (0x%x) for opcode %s\n",
