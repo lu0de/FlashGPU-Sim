@@ -38,6 +38,7 @@ typedef void *yyscan_t;
 #include <stdlib.h>
 #include <algorithm>
 #include <list>
+#include <iterator>
 #include <map>
 #include <set>
 #include <vector>
@@ -596,6 +597,25 @@ void function_info::connect_basic_blocks()  // iterate across m_basic_blocks of
     ptx_instruction *pI = (*bb_itr)->ptx_end;
     if ((*bb_itr)->is_exit)  // reached last basic block, no successors to link
       continue;
+    if (pI == NULL) {
+      // A block can end up without a terminating instruction when its leader
+      // is a label whose only following instructions are further labels (as
+      // produced by inline asm emitting consecutive label groups). Treat the
+      // block as falling through to the next block instead of dereferencing
+      // the NULL ptx_end.
+      basic_block_t *p_bb = *bb_itr;
+      printf("GPGPU-Sim PTX: Warning basic block %d in '%s' has no end "
+             "instruction (begin PC=%u, label=%d); linking to next block.\n",
+             p_bb->bb_id, m_name.c_str(),
+             p_bb->ptx_begin ? p_bb->ptx_begin->get_PC() : 0,
+             p_bb->ptx_begin ? int(p_bb->ptx_begin->is_label()) : -1);
+      basic_block_t *next_bb =
+          std::next(bb_itr) != m_basic_blocks.end() ? *std::next(bb_itr)
+                                                  : exit_bb;
+      p_bb->successor_ids.insert(next_bb->bb_id);
+      next_bb->predecessor_ids.insert(p_bb->bb_id);
+      continue;
+    }
     if (pI->get_opcode() == RETP_OP || pI->get_opcode() == RET_OP ||
         pI->get_opcode() == EXIT_OP) {
       (*bb_itr)->successor_ids.insert(exit_bb->bb_id);
@@ -652,6 +672,8 @@ bool function_info::connect_break_targets()  // connecting break instructions
     ptx_instruction *pI = p_bb->ptx_end;
     if (p_bb->is_exit)  // reached last basic block, no successors to link
       continue;
+    if (pI == NULL)
+      continue;  // guard: label-only block, handled in connect_basic_blocks
     if (pI->get_opcode() == BREAK_OP) {
       // backup existing successor_ids for stability check
       std::set<int> orig_successor_ids = p_bb->successor_ids;
