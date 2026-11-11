@@ -42,9 +42,16 @@ inline bool decode_sm100_opaque_tensormap(const tensormap_descriptor_t &encoded,
   constexpr uint32_t kCudaApiMagic = 0x06330u;
   constexpr uint32_t kCuteDslLoadMagic = 0x46332u;
   constexpr uint32_t kCuteDslStoreMagic = 0x44332u;
+  // Bits 8-11 of the magic carry the element dtype: 3 = fp16, 5 = bf16.
+  // Everything below bit 8 stays identical, so compare the masked magic.
   const uint32_t magic = tma_opaque_low32(encoded.raw_u64[1]) & kMagicMask;
-  if (magic != kCudaApiMagic && magic != kCuteDslLoadMagic &&
-      magic != kCuteDslStoreMagic)
+  const uint32_t dtype_nibble = (magic >> 8) & 0xfu;
+  const uint32_t magic_base = magic & ~0xf00u;
+  const bool magic_ok = (dtype_nibble == 3u || dtype_nibble == 5u) &&
+                        (magic_base == (kCudaApiMagic & ~0xf00u) ||
+                         magic_base == (kCuteDslLoadMagic & ~0xf00u) ||
+                         magic_base == (kCuteDslStoreMagic & ~0xf00u));
+  if (!magic_ok)
     return false;
   if (encoded.raw_u64[0] == 0)
     return false;
@@ -69,10 +76,11 @@ inline bool decode_sm100_opaque_tensormap(const tensormap_descriptor_t &encoded,
   std::memset(&decoded, 0, sizeof(decoded));
   decoded.fields.globalAddress = encoded.raw_u64[0];
   decoded.fields.tensorRank = 3; // CUDA tensorRank=4, internal rank is 0-based.
-  // FA4 SM100 forward currently uses fp16/bf16 TMA operands.  The observed
-  // opaque descriptor bytes do not expose a stable public dtype field; for TMA
-  // address generation both types are 2 bytes, so model the transfer as fp16.
-  decoded.fields.tensorDataType = TMA_DTYPE_F16;
+  // FA4 SM100 forward currently uses fp16/bf16 TMA operands.  For TMA
+  // address generation both types are 2 bytes; the dtype nibble of the
+  // descriptor magic selects which semantic dtype to model.
+  decoded.fields.tensorDataType =
+      (dtype_nibble == 5u) ? TMA_DTYPE_BF16 : TMA_DTYPE_F16;
   decoded.fields.globalDim[0] = global_dim0;
   decoded.fields.globalDim[1] = global_dim1;
   decoded.fields.globalDim[2] = global_dim2;

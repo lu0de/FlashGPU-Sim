@@ -1288,9 +1288,13 @@ bool has_floating_scalar_type(const ptx_instruction *inst) {
     case F16_TYPE:
     case F16X2_TYPE:
     case BF16_TYPE:
+    case BF16X2_TYPE:
     case TF32_TYPE:
     case E4M3_TYPE:
     case E5M2_TYPE:
+    case E4M3X2_TYPE:
+    case E5M2X2_TYPE:
+    case E2M1X2_TYPE:
     case F32_TYPE:
     case F32X2_TYPE:
     case F64_TYPE:
@@ -1429,6 +1433,10 @@ inst_class_t classify_inst(const ptx_instruction *inst) {
   case TCGEN05_SHIFT_OP:
   case TCGEN05_FENCE_OP:
     return inst_class_t::control;
+
+  case CLC_QUERY_CANCELED_OP:
+  case CLC_QUERY_FIRST_CTA_OP:
+    return inst_class_t::intp;
 
   case ADDP_OP:
   case ADDC_OP:

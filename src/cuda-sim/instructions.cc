@@ -57,6 +57,7 @@ class ptx_recognizer;
 #include "../gpgpu-sim/flash/elect.h"
 #include "../gpgpu-sim/flash/mbarrier.h"
 #include "../gpgpu-sim/flash/ld_st_matrix.h"
+#include "../gpgpu-sim/flash/lowp_float.h"
 #include "../gpgpu-sim/flash/tcgen05.h"
 #include "../gpgpu-sim/flash/tma.h"
 #include "../gpgpu-sim/flash/tb_cluster.h"
@@ -280,6 +281,59 @@ static inline void set_fenv_rounding_mode(unsigned rounding_mode) {
 
 static inline float f32_from_f16_bits(uint16_t bits) {
   return half_float::detail::half2float<float>(bits);
+}
+
+static inline float f32_from_bf16_bits(uint16_t bits) {
+  uint32_t u = static_cast<uint32_t>(bits) << 16;
+  float f;
+  std::memcpy(&f, &u, sizeof(f));
+  return f;
+}
+
+// f32 -> bf16. RNE via add-bias trick; inf/+-0 pass through; NaN -> canonical
+// 0x7FFF, as measured on H100 (sm_90a) cvt.*.bf16*.f32 instructions.
+static inline uint16_t bf16_bits_from_f32(float value, unsigned rounding_mode) {
+  uint32_t u;
+  std::memcpy(&u, &value, sizeof(u));
+  if (std::isnan(value)) {
+    return 0x7FFFu;
+  }
+  switch (rounding_mode) {
+    case RZ_OPTION:
+    case RZI_OPTION:
+      return static_cast<uint16_t>(u >> 16);
+    case RM_OPTION:
+    case RMI_OPTION:
+      u += (u & 0x80000000u) ? 0xFFFFu : 0;
+      return static_cast<uint16_t>(u >> 16);
+    case RP_OPTION:
+    case RPI_OPTION:
+      u += (u & 0x80000000u) ? 0 : 0xFFFFu;
+      return static_cast<uint16_t>(u >> 16);
+    case RN_OPTION:
+    case RNI_OPTION:
+    default:
+      u += 0x7FFFu + ((u >> 16) & 1u);
+      return static_cast<uint16_t>(u >> 16);
+  }
+}
+
+
+static inline float relu_f32(float v) {
+  return (v < 0.0f) ? 0.0f : v;  // .relu: clamp negative to +0; NaN stays NaN.
+}
+
+// bf16x2 element-wise helper: unpack two bf16 lanes, apply fn per lane, repack.
+static inline uint32_t bf16x2_apply(uint32_t a_bits, uint32_t b_bits,
+                                    unsigned rounding_mode,
+                                    float (*fn)(float, float)) {
+  float alo = f32_from_bf16_bits(static_cast<uint16_t>(a_bits & 0xFFFFu));
+  float ahi = f32_from_bf16_bits(static_cast<uint16_t>((a_bits >> 16) & 0xFFFFu));
+  float blo = f32_from_bf16_bits(static_cast<uint16_t>(b_bits & 0xFFFFu));
+  float bhi = f32_from_bf16_bits(static_cast<uint16_t>((b_bits >> 16) & 0xFFFFu));
+  uint16_t dlo = bf16_bits_from_f32(fn(alo, blo), rounding_mode);
+  uint16_t dhi = bf16_bits_from_f32(fn(ahi, bhi), rounding_mode);
+  return (static_cast<uint32_t>(dhi) << 16) | static_cast<uint32_t>(dlo);
 }
 
 void ptx_thread_info::set_reg(const symbol *reg, const ptx_reg_t &value) {
@@ -560,10 +614,14 @@ ptx_reg_t ptx_thread_info::get_operand_value(const operand_info &op,
         result.u64 = (result.u64 >> 16) & 0xFFFF;
     } else if (opType == BB128_TYPE) {
       // b128
-      result.u128.lowest = get_reg(op.vec_symbol(0)).u32;
-      result.u128.low = get_reg(op.vec_symbol(1)).u32;
-      result.u128.high = get_reg(op.vec_symbol(2)).u32;
-      result.u128.highest = get_reg(op.vec_symbol(3)).u32;
+      if (op.is_vector()) {
+        result.u128.lowest = get_reg(op.vec_symbol(0)).u32;
+        result.u128.low = get_reg(op.vec_symbol(1)).u32;
+        result.u128.high = get_reg(op.vec_symbol(2)).u32;
+        result.u128.highest = get_reg(op.vec_symbol(3)).u32;
+      } else {
+        result = get_reg(op.get_symbol());
+      }
     } else {
       // bb64 or ff64
       result.bits.ls = get_reg(op.vec_symbol(0)).u32;
@@ -918,17 +976,22 @@ void ptx_thread_info::set_operand_value(const operand_info &dst,
       setValue3.u32 = data.u128.high;
       setValue4.u32 = data.u128.highest;
 
-      const symbol *name1, *name2, *name3, *name4 = NULL;
+      if (dst.is_vector()) {
+        const symbol *name1, *name2, *name3, *name4 = NULL;
 
-      name1 = dst.vec_symbol(0);
-      name2 = dst.vec_symbol(1);
-      name3 = dst.vec_symbol(2);
-      name4 = dst.vec_symbol(3);
+        name1 = dst.vec_symbol(0);
+        name2 = dst.vec_symbol(1);
+        name3 = dst.vec_symbol(2);
+        name4 = dst.vec_symbol(3);
 
-      set_reg(name1, setValue);
-      set_reg(name2, setValue2);
-      set_reg(name3, setValue3);
-      set_reg(name4, setValue4);
+        set_reg(name1, setValue);
+        set_reg(name2, setValue2);
+        set_reg(name3, setValue3);
+        set_reg(name4, setValue4);
+      } else {
+        setValue = data;
+        set_reg(dst.get_symbol(), setValue);
+      }
     } else if (type == BB64_TYPE || type == FF64_TYPE) {
       // ptxplus version of storing 64 bit values to registers stores to two
       // adjacent registers
@@ -1081,6 +1144,12 @@ void abs_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       break;
     case U64_TYPE:
       d.s64 = my_abs(a.u64);
+      break;
+    case BF16_TYPE:
+      d.u32 = a.u32 & 0x7FFFu;
+      break;
+    case BF16X2_TYPE:
+      d.u32 = a.u32 & 0x7FFF7FFFu;
       break;
     case F32_TYPE:
       d.f32 = my_abs(a.f32);
@@ -1272,6 +1341,33 @@ void add_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       data.u32 = (static_cast<uint32_t>(dhi) << 16) | static_cast<uint32_t>(dlo);
       break;
     }
+    case BF16_TYPE: {
+      uint16_t s1 = static_cast<uint16_t>(src1_data.u32 & 0xFFFFu);
+      uint16_t s2 = static_cast<uint16_t>(src2_data.u32 & 0xFFFFu);
+      float r = f32_from_bf16_bits(s1) + f32_from_bf16_bits(s2);
+      if (pI->saturation_mode())
+        r = (r < 0.0f) ? 0.0f : (r > 1.0f) ? 1.0f : r;
+      if (pI->is_relu()) r = relu_f32(r);
+      data.u32 = bf16_bits_from_f32(r, rounding_mode);
+      break;
+    }
+    case BF16X2_TYPE: {
+      uint16_t s1lo = static_cast<uint16_t>(src1_data.u32 & 0xFFFFu);
+      uint16_t s1hi = static_cast<uint16_t>((src1_data.u32 >> 16) & 0xFFFFu);
+      uint16_t s2lo = static_cast<uint16_t>(src2_data.u32 & 0xFFFFu);
+      uint16_t s2hi = static_cast<uint16_t>((src2_data.u32 >> 16) & 0xFFFFu);
+      float rlo = f32_from_bf16_bits(s1lo) + f32_from_bf16_bits(s2lo);
+      float rhi = f32_from_bf16_bits(s1hi) + f32_from_bf16_bits(s2hi);
+      if (pI->saturation_mode()) {
+        rlo = (rlo < 0.0f) ? 0.0f : (rlo > 1.0f) ? 1.0f : rlo;
+        rhi = (rhi < 0.0f) ? 0.0f : (rhi > 1.0f) ? 1.0f : rhi;
+      }
+      uint16_t dlo = bf16_bits_from_f32(rlo, rounding_mode);
+      if (pI->is_relu()) { rlo = relu_f32(rlo); rhi = relu_f32(rhi); }
+      uint16_t dhi = bf16_bits_from_f32(rhi, rounding_mode);
+      data.u32 = (static_cast<uint32_t>(dhi) << 16) | static_cast<uint32_t>(dlo);
+      break;
+    }
     case F32X2_TYPE: {
       // packed dual-f32: lo=bits[31:0], hi=bits[63:32]
       uint32_t s1lo = (uint32_t)(src1_data.u64 & 0xFFFFFFFFu);
@@ -1374,6 +1470,13 @@ void bar_callback(const inst_t *inst, ptx_thread_info *thread) {
   thread->set_operand_value(dst, value, U32_TYPE, thread, pI);
 }
 
+static bool atomic_rmw_compute(const ptx_instruction *pI,
+                               ptx_thread_info *thread, unsigned m_atomic_spec,
+                               unsigned to_type, const ptx_reg_t &data,
+                               const ptx_reg_t &src2_data,
+                               const operand_info &type_ref,
+                               ptx_reg_t &op_result);
+
 void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
   const ptx_instruction *pI = dynamic_cast<const ptx_instruction *>(inst);
 
@@ -1431,6 +1534,30 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
   // Get the atomic operation to be performed
   unsigned m_atomic_spec = pI->get_atomic();
 
+  data_ready = atomic_rmw_compute(pI, thread, m_atomic_spec, to_type, data,
+                                  src2_data, dst, op_result);
+
+  // Write operation result into  memory
+  // (i.e. copy src1_data to dst)
+  if (data_ready) {
+    mem->write(effective_address, size / 8, &op_result.s64, thread, pI);
+  } else {
+    printf("Execution error: data_ready not set\n");
+    assert(0);
+  }
+}
+
+// Shared read-modify-write for atom/red callbacks: given the memory value
+// already read into 'data' and operand b in 'src2_data', compute the result
+// to write back. 'type_ref' supplies the operand used to type-check CAS's
+// compare operand; for red there is no dst so callers pass src1.
+static bool atomic_rmw_compute(const ptx_instruction *pI,
+                               ptx_thread_info *thread, unsigned m_atomic_spec,
+                               unsigned to_type, const ptx_reg_t &data,
+                               const ptx_reg_t &src2_data,
+                               const operand_info &type_ref,
+                               ptx_reg_t &op_result) {
+  bool data_ready = false;
   switch (m_atomic_spec) {
     // AND
     case ATOMIC_AND: {
@@ -1505,7 +1632,8 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
     case ATOMIC_CAS: {
       ptx_reg_t src3_data;
       const operand_info &src3 = pI->src3();
-      src3_data = thread->get_operand_value(src3, dst, to_type, thread, 1);
+      src3_data =
+          thread->get_operand_value(src3, type_ref, to_type, thread, 1);
 
       switch (to_type) {
         case B32_TYPE:
@@ -1688,10 +1816,47 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
       break;
     }
   }
+  return data_ready;
+}
 
-  // Write operation result into  memory
-  // (i.e. copy src1_data to dst)
-  if (data_ready) {
+// red_callback is like atom_callback but the instruction has no destination
+// register: operand 0 is the address, operand 1 the value, and the RMW result
+// goes to memory only.
+void red_callback(const inst_t *inst, ptx_thread_info *thread) {
+  const ptx_instruction *pI = dynamic_cast<const ptx_instruction *>(inst);
+
+  unsigned to_type = pI->get_type();
+  size_t size;
+  int t;
+  type_info_key::type_decode(to_type, size, t);
+
+  ptx_reg_t data;
+  ptx_reg_t src1_data;
+  ptx_reg_t src2_data;
+  ptx_reg_t op_result;
+
+  const operand_info &src1 = pI->dst();   // a (address, operand 0)
+  const operand_info &src2 = pI->src1();  // b (value)
+
+  src1_data = thread->get_operand_value(src1, src1, to_type, thread, 1);
+  src2_data = thread->get_operand_value(src2, src1, to_type, thread, 1);
+
+  addr_t effective_address = src1_data.u64;
+  memory_space_t space = pI->get_space();
+  normalize_scoped_shared_space(space, pI);
+  if (space == undefined_space) space = generic_space;
+  if (space == shared_space && effective_address < SHARED_GENERIC_START)
+    effective_address &= 0x00000000FFFFFFFFULL;
+  memory_space *mem = NULL;
+  decode_space(space, thread, src1, mem, effective_address);
+  assert(mem);
+  assert(space == global_space || space == shared_space);
+
+  mem->read(effective_address, size / 8, &data.s64);
+
+  unsigned m_atomic_spec = pI->get_atomic();
+  if (atomic_rmw_compute(pI, thread, m_atomic_spec, to_type, data, src2_data,
+                         src1, op_result)) {
     mem->write(effective_address, size / 8, &op_result.s64, thread, pI);
   } else {
     printf("Execution error: data_ready not set\n");
@@ -1911,6 +2076,68 @@ void fence_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 void griddepcontrol_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   (void)pI;
   (void)thread;
+}
+
+// clusterlaunchcontrol.try_cancel: write the 16-byte cancellation
+// response (all zeros = nothing pending to cancel in this simulation) to
+// [dst] in shared::cta, then complete 16 tx bytes on the mbarrier.
+void clc_try_cancel_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  assert(pI->get_num_operands() == 2);
+  const operand_info &result_op = pI->dst();
+  const operand_info &mbarrier_op = pI->src1();
+  const uint32_t result_addr =
+      thread->get_operand_value(result_op, result_op, B32_TYPE, thread, 0).u32;
+  const uint32_t mbarrier_addr = thread
+      ->get_operand_value(mbarrier_op, mbarrier_op, B32_TYPE, thread, 0)
+      .u32;
+
+  // .multicast::cluster::all fans the response out to every CTA in the
+  // cluster; only single-CTA clusters are supported here.
+  for (int opt : pI->get_options()) {
+    if (opt == MULTICAST_CLUSTER_ALL_OPTION) {
+      unsigned n_ctas = thread->get_kernel().get_ctas_per_cluster();
+      if (n_ctas > 1) {
+        fprintf(stderr,
+                "GPGPU-Sim: clusterlaunchcontrol.try_cancel with "
+                ".multicast::cluster::all requires a multi-CTA cluster "
+                "(%u CTAs), which is not supported\n",
+                n_ctas);
+        abort();
+      }
+      break;
+    }
+  }
+
+  const ptx_reg_t result = {};
+  thread->m_shared_mem->write(result_addr, sizeof(result.u128), &result.u128,
+                              thread, pI);
+  thread->m_last_effective_address = result_addr;
+  thread->m_last_memory_space = shared_space;
+
+  inst_t::mbarrier_info_t info;
+  info.bar_id = mbarrier_addr;
+  info.bar_count = sizeof(result.u128);
+  const_cast<ptx_instruction *>(pI)->set_mbarrier_info(thread->get_laneid(),
+                                                     info);
+}
+
+void clc_query_canceled_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  ptx_reg_t predicate = {};
+  predicate.pred = 1; // ptxplus predicate encoding: one means false.
+  thread->set_operand_value(pI->dst(), predicate, PRED_TYPE, thread, pI);
+}
+
+void clc_query_first_cta_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  const operand_info &dst = pI->dst();
+  ptx_reg_t zero = {};
+  if (dst.is_vector()) {
+    for (unsigned i = 0; i < dst.get_vect_nelem(); ++i) {
+      const symbol *reg = dst.vec_symbol_or_null(i);
+      if (reg && reg->name() != "_") thread->set_reg(reg, zero);
+    }
+  } else {
+    thread->set_operand_value(dst, zero, B32_TYPE, thread, pI);
+  }
 }
 
 void elect_impl(const ptx_instruction *pI, core_t *core, warp_inst_t &inst) {
@@ -2182,21 +2409,35 @@ void bfind_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   }
 
   // negate negative signed inputs
-  if ((i_type == S32_TYPE || i_type == S64_TYPE) && (a & (1 << msb))) {
+  if ((i_type == S32_TYPE || i_type == S64_TYPE) && (a & (1ULL << msb))) {
     a = ~a;
   }
   uint32_t d_data = 0xffffffff;
   for (uint32_t i = msb; i >= 0; i--) {
-    if (a & (1 << i)) {
+    if (a & (1ULL << i)) {
       d_data = i;
       break;
     }
   }
 
-  // if (.shiftamt && d != 0xffffffff)  { d = msb - d; }
+  if (d_data != 0xffffffff) {
+    for (int opt : pI->get_options()) {
+      if (opt == SHIFTAMT_OPTION) {
+        d_data = msb - d_data;
+        break;
+      }
+    }
+  }
 
   // store d
   thread->set_operand_value(dst, d_data, U32_TYPE, thread, pI);
+}
+
+void createpolicy_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  // Cache-eviction policy descriptor: simulator models no eviction policy,
+  // so materialize a constant placeholder into the destination register.
+  const operand_info &dst = pI->dst();
+  thread->set_operand_value(dst, (unsigned long long)0, U64_TYPE, thread, pI);
 }
 
 void bra_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
@@ -3482,6 +3723,108 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       type_info_key::type_decode(from_type, from_width, from_sign);
   unsigned dst_fmt = type_info_key::type_decode(to_type, to_width, to_sign);
 
+  // cvt.rn.satfinite{,.relu}.{e4m3x2,e5m2x2}.f32: pack two f32 sources into
+  // one packed fp8 pair. src1 lands in the high byte, src2 in the low byte.
+  if ((to_type == E4M3X2_TYPE || to_type == E5M2X2_TYPE) &&
+      from_type == F32_TYPE) {
+    assert(pI->get_num_operands() >= 3 &&
+           "cvt.{e4m3x2,e5m2x2}.f32 requires 3 operands (dst, src1, src2).");
+    const std::vector<operand_info> &operands = pI->get_operands();
+    const operand_info &src2 = operands[2];
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t src2_data =
+        thread->get_operand_value(src2, dst, from_type, thread, 1);
+    const bool is_e4m3 = to_type == E4M3X2_TYPE;
+    float hi = src1_data.f32;
+    float lo = src2_data.f32;
+    if (pI->is_relu()) {
+      // relu clamps negatives (including -0) to +0 but keeps NaN.
+      hi = std::signbit(hi) && !std::isnan(hi) ? 0.0f : hi;
+      lo = std::signbit(lo) && !std::isnan(lo) ? 0.0f : lo;
+    }
+    ptx_reg_t result;
+    result.u64 = 0;
+    result.u16 =
+        (static_cast<uint16_t>(flash_gpgpu_sim::f32_to_fp8(hi, is_e4m3)) << 8) |
+        flash_gpgpu_sim::f32_to_fp8(lo, is_e4m3);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // cvt.rn.satfinite{,.relu}.e2m1x2.f32: pack two f32 sources into one
+  // packed fp4 pair (8-bit). src1 lands in the high nibble, src2 in the low.
+  if (to_type == E2M1X2_TYPE && from_type == F32_TYPE) {
+    assert(pI->get_num_operands() >= 3 &&
+           "cvt.e2m1x2.f32 requires 3 operands (dst, src1, src2).");
+    const std::vector<operand_info> &operands = pI->get_operands();
+    const operand_info &src2 = operands[2];
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t src2_data =
+        thread->get_operand_value(src2, dst, from_type, thread, 1);
+    float hi = src1_data.f32;
+    float lo = src2_data.f32;
+    if (pI->is_relu()) {
+      hi = std::signbit(hi) && !std::isnan(hi) ? 0.0f : hi;
+      lo = std::signbit(lo) && !std::isnan(lo) ? 0.0f : lo;
+    }
+    ptx_reg_t result;
+    result.u64 = 0;
+    result.u8 = (flash_gpgpu_sim::f32_to_e2m1(hi) << 4) |
+                flash_gpgpu_sim::f32_to_e2m1(lo);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // cvt.rn{,.relu}.f16x2.e2m1x2: low nibble -> low half, high nibble -> high.
+  if (to_type == F16X2_TYPE && from_type == E2M1X2_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    const bool relu = pI->is_relu();
+    auto decode_lane = [&](uint8_t nibble) -> uint16_t {
+      float f = flash_gpgpu_sim::e2m1_to_f32(nibble);
+      if (relu && std::signbit(f))
+        f = 0.0f;
+      return f16_bits_from_f32(f, RN_OPTION);
+    };
+    uint16_t lo16 = decode_lane(src1_data.u8 & 0xFu);
+    uint16_t hi16 = decode_lane((src1_data.u8 >> 4) & 0xFu);
+    ptx_reg_t result;
+    result.u32 =
+        (static_cast<uint32_t>(hi16) << 16) | static_cast<uint32_t>(lo16);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // cvt.rn{,.relu}.f16x2.{e4m3x2,e5m2x2}: low byte -> low half, high byte ->
+  // high half.
+  if (to_type == F16X2_TYPE &&
+      (from_type == E4M3X2_TYPE || from_type == E5M2X2_TYPE)) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    const bool is_e4m3 = from_type == E4M3X2_TYPE;
+    const bool relu = pI->is_relu();
+    auto decode_lane = [&](uint8_t byte) -> uint16_t {
+      // fp8 NaN encodings produce the canonical positive f16 NaN.
+      bool nan = is_e4m3 ? (byte & 0x7Fu) == 0x7Fu : (byte & 0x7Fu) >= 0x7Du;
+      if (nan)
+        return 0x7FFF;
+      float f = flash_gpgpu_sim::fp8_to_f32(byte, is_e4m3);
+      if (relu && std::signbit(f))
+        f = 0.0f;
+      return f16_bits_from_f32(f, RN_OPTION);
+    };
+    uint16_t lo16 = decode_lane(static_cast<uint8_t>(src1_data.u16 & 0xFFu));
+    uint16_t hi16 =
+        decode_lane(static_cast<uint8_t>((src1_data.u16 >> 8) & 0xFFu));
+    ptx_reg_t result;
+    result.u32 =
+        (static_cast<uint32_t>(hi16) << 16) | static_cast<uint32_t>(lo16);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
   // Special handling for cvt.f16x2.f32: convert two f32 sources to one f16x2 destination
   if (to_type == F16X2_TYPE && from_type == F32_TYPE) {
 
@@ -3525,6 +3868,93 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
     thread->set_operand_value(dst, result, to_type, thread, pI);
     return;
+  }
+
+  // cvt.{rn,rz}.bf16x2.f32: pack two f32 sources into one bf16x2.
+  // High 16 bits from src1, low 16 bits from src2 (same convention as f16x2).
+  if (to_type == BF16X2_TYPE && from_type == F32_TYPE) {
+    assert(pI->get_num_operands() >= 3 &&
+           "cvt.bf16x2.f32 requires 3 operands (dst, src1, src2).");
+    const std::vector<operand_info> &operands = pI->get_operands();
+    const operand_info &src2 = operands[2];
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t src2_data =
+        thread->get_operand_value(src2, dst, from_type, thread, 1);
+    if (rounding_mode != RN_OPTION && rounding_mode != RNI_OPTION &&
+        rounding_mode != RZ_OPTION && rounding_mode != RZI_OPTION) {
+      printf("GPGPU-Sim PTX: ERROR ** Unsupported rounding mode for cvt.bf16x2.f32\n");
+      printf("  Instruction: %s\n", pI->to_string().c_str());
+      printf("  Only .rn and .rz are supported\n");
+      abort();
+    }
+    uint16_t lo = bf16_bits_from_f32(src2_data.f32, rounding_mode);
+    uint16_t hi = bf16_bits_from_f32(src1_data.f32, rounding_mode);
+    ptx_reg_t result;
+    result.u32 = (static_cast<uint32_t>(hi) << 16) | static_cast<uint32_t>(lo);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // Scalar bf16 cvts. BF16 decodes to fmt 20 and BF16X2 to fmt 24, both beyond
+  // the 11x11 g_cvt_fn table, so they must be handled before indexing into it.
+  if (to_type == BF16_TYPE && from_type == F32_TYPE) {
+    if (rounding_mode != RN_OPTION && rounding_mode != RNI_OPTION &&
+        rounding_mode != RZ_OPTION && rounding_mode != RZI_OPTION &&
+        rounding_mode != RM_OPTION && rounding_mode != RMI_OPTION &&
+        rounding_mode != RP_OPTION && rounding_mode != RPI_OPTION) {
+      printf("GPGPU-Sim PTX: ERROR ** Unsupported rounding mode for cvt.bf16.f32\n");
+      printf("  Instruction: %s\n", pI->to_string().c_str());
+      abort();
+    }
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t result;
+    result.u32 = bf16_bits_from_f32(src1_data.f32, rounding_mode);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+  if (from_type == BF16_TYPE && to_type == F32_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t result;
+    result.u32 = (src1_data.u32 & 0xFFFFu) << 16;
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  // Abort for other unimplemented conversions involving bf16 / bf16x2 instead
+  // of indexing g_cvt_fn out of bounds.
+  if (to_type == BF16_TYPE && from_type == S32_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    ptx_reg_t result;
+    result.u32 =
+        bf16_bits_from_f32(static_cast<float>(src1_data.s32), rounding_mode);
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+  if (to_type == S32_TYPE && from_type == BF16_TYPE) {
+    ptx_reg_t src1_data =
+        thread->get_operand_value(src1, dst, from_type, thread, 1);
+    // cvt.rni.s32.bf16: bf16 -> s32, RN rounding.
+    float f = f32_from_bf16_bits(static_cast<uint16_t>(src1_data.u32 & 0xFFFFu));
+    ptx_reg_t result;
+    result.s32 = static_cast<int32_t>(std::nearbyint(f));
+    thread->set_operand_value(dst, result, to_type, thread, pI);
+    return;
+  }
+
+  if (to_type == BF16_TYPE || from_type == BF16_TYPE ||
+      to_type == BF16X2_TYPE || from_type == BF16X2_TYPE) {
+    printf("GPGPU-Sim PTX: ERROR ** Unsupported cvt conversion involving bf16\n");
+    printf("  Instruction: %s\n", pI->to_string().c_str());
+    printf("  From type: %s, To type: %s\n", decode_token(from_type),
+           decode_token(to_type));
+    printf("  Only cvt.{rn,rz,rm,rp}.bf16x2.f32, cvt.{rn,rz,rm,rp}.bf16.f32, "
+           "cvt.f32.bf16, cvt.rn.bf16.s32 and cvt.rni.s32.bf16 are currently "
+           "supported\n");
+    abort();
   }
 
   // Abort for other unimplemented conversions involving F16X2_TYPE
@@ -3575,6 +4005,7 @@ void cvt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       default:
         assert(0);
     }
+
   }
 
   if (g_cvt_fn[src_fmt][dst_fmt] != NULL) {
@@ -3674,6 +4105,39 @@ void div_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   ptx_reg_t src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
   ptx_reg_t src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
+
+  // Integer divide by zero returns all-ones on NVIDIA hardware rather than
+  // raising SIGFPE.
+  bool int_divisor_zero = false;
+  switch (i_type) {
+    case S8_TYPE:
+    case U8_TYPE:
+    case B8_TYPE:
+      int_divisor_zero = (src2_data.u8 == 0);
+      break;
+    case S16_TYPE:
+    case U16_TYPE:
+    case B16_TYPE:
+      int_divisor_zero = (src2_data.u16 == 0);
+      break;
+    case S32_TYPE:
+    case U32_TYPE:
+    case B32_TYPE:
+      int_divisor_zero = (src2_data.u32 == 0);
+      break;
+    case S64_TYPE:
+    case U64_TYPE:
+    case B64_TYPE:
+      int_divisor_zero = (src2_data.u64 == 0);
+      break;
+    default:
+      break;
+  }
+  if (int_divisor_zero) {
+    data.u64 = 0xFFFFFFFFFFFFFFFFULL;
+    thread->set_operand_value(dst, data, i_type, thread, pI);
+    return;
+  }
 
   switch (i_type) {
     case S8_TYPE:
@@ -4717,6 +5181,31 @@ void mad_def(const ptx_instruction *pI, ptx_thread_info *thread,
       fesetround(orig_rm);
       break;
     }
+    case BF16_TYPE: {
+      float fa = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float fb = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float fc = f32_from_bf16_bits(static_cast<uint16_t>(c.u32 & 0xFFFFu));
+      float r = std::fma(fa, fb, fc);
+      if (pI->is_relu()) r = relu_f32(r);
+      d.u32 = bf16_bits_from_f32(r, RN_OPTION);
+      break;
+    }
+
+    case BF16X2_TYPE: {
+      float a_lo = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float a_hi = f32_from_bf16_bits(static_cast<uint16_t>((a.u32 >> 16) & 0xFFFFu));
+      float b_lo = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float b_hi = f32_from_bf16_bits(static_cast<uint16_t>((b.u32 >> 16) & 0xFFFFu));
+      float c_lo = f32_from_bf16_bits(static_cast<uint16_t>(c.u32 & 0xFFFFu));
+      float c_hi = f32_from_bf16_bits(static_cast<uint16_t>((c.u32 >> 16) & 0xFFFFu));
+      float r_lo = std::fma(a_lo, b_lo, c_lo);
+      float r_hi = std::fma(a_hi, b_hi, c_hi);
+      if (pI->is_relu()) { r_lo = relu_f32(r_lo); r_hi = relu_f32(r_hi); }
+      uint16_t d_lo = bf16_bits_from_f32(r_lo, RN_OPTION);
+      uint16_t d_hi = bf16_bits_from_f32(r_hi, RN_OPTION);
+      d.u32 = (static_cast<uint32_t>(d_hi) << 16) | static_cast<uint32_t>(d_lo);
+      break;
+    }
     case F32X2_TYPE: {
       // packed dual-f32 FMA: lo=bits[31:0], hi=bits[63:32]
       assert(use_carry == false);
@@ -4803,6 +5292,20 @@ void max_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case S64_TYPE:
       d.s64 = MY_MAX_I(a.s64, b.s64);
       break;
+    case BF16_TYPE: {
+      float fa = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float fb = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float fr = std::isnan(fa) ? fb : (std::isnan(fb) ? fa : (fa > fb ? fa : fb));
+      d.u32 = bf16_bits_from_f32(fr, RN_OPTION);
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float x, float y) {
+        return std::isnan(x) ? y : (std::isnan(y) ? x : (x > y ? x : y));
+      };
+      d.u32 = bf16x2_apply(a.u32, b.u32, RN_OPTION, +fn);
+      break;
+    }
     case F32_TYPE:
       d.f32 = MY_MAX_F(a.f32, b.f32);
       if (pI->get_num_operands() == 4) {
@@ -4857,6 +5360,20 @@ void min_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case S64_TYPE:
       d.s64 = MY_MIN_I(a.s64, b.s64);
       break;
+    case BF16_TYPE: {
+      float fa = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+      float fb = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      float fr = std::isnan(fa) ? fb : (std::isnan(fb) ? fa : (fa < fb ? fa : fb));
+      d.u32 = bf16_bits_from_f32(fr, RN_OPTION);
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float x, float y) {
+        return std::isnan(x) ? y : (std::isnan(y) ? x : (x < y ? x : y));
+      };
+      d.u32 = bf16x2_apply(a.u32, b.u32, RN_OPTION, +fn);
+      break;
+    }
     case F32_TYPE:
       d.f32 = MY_MIN_F(a.f32, b.f32);
       if (pI->get_num_operands() == 4) {
@@ -5181,6 +5698,23 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       fesetround(orig_rm);
       break;
     }
+    case BF16_TYPE: {
+      float r = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu)) *
+                f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+      if (pI->is_relu()) r = relu_f32(r);
+      d.u32 = bf16_bits_from_f32(r, rounding_mode);
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float a, float b) { return a * b; };
+      d.u32 = bf16x2_apply(a.u32, b.u32, rounding_mode, +fn);
+      if (pI->is_relu()) {
+        uint16_t lo = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(d.u32 & 0xFFFFu)), rounding_mode);
+        uint16_t hi = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(d.u32 >> 16)), rounding_mode);
+        d.u32 = (uint32_t(hi) << 16) | lo;
+      }
+      break;
+    }
     case F32X2_TYPE: {
       int orig_rm = fegetround();
       switch (rounding_mode) {
@@ -5264,6 +5798,12 @@ void neg_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case F16_TYPE:
       data.f16 = 0.0f - src1_data.f16;
       break;  // assert(0); break;
+    case BF16_TYPE:
+      data.u32 = (static_cast<uint32_t>(src1_data.u32) & 0xFFFFu) ^ 0x8000u;
+      break;
+    case BF16X2_TYPE:
+      data.u32 = src1_data.u32 ^ 0x80008000u;
+      break;
     case F32_TYPE:
       data.f32 = 0.0f - src1_data.f32;
       break;
@@ -5556,7 +6096,52 @@ void rcp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 }
 
 void red_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  inst_not_implemented(pI);
+  // SYNTAX
+  // red{.sem}{.scope}{.space}.op.type [a], b;  -- atom without a destination.
+  // Modelled with atom's memory timing (same callback mechanism); red.async
+  // and remote-DSM red are not supported.
+
+  const auto &options = pI->get_options();
+  if (std::find(options.begin(), options.end(), ASYNC_OPTION) !=
+      options.end()) {
+    printf("GPGPU-Sim PTX: ERROR ** red.async is not supported\n");
+    printf("  Instruction: %s\n", pI->to_string().c_str());
+    abort();
+  }
+
+  // obtain memory space of the operation
+  memory_space_t space = pI->get_space();
+  normalize_scoped_shared_space(space, pI);
+
+  // get the memory address (operand 0; operand 1 is the value)
+  const operand_info &src1 = pI->dst();
+  unsigned i_type = pI->get_type();
+  ptx_reg_t src1_data;
+  src1_data = thread->get_operand_value(src1, src1, i_type, thread, 1);
+  addr_t effective_address = src1_data.u64;
+
+  if (space == undefined_space)
+    space = generic_space;
+  if (space == shared_space && effective_address < SHARED_GENERIC_START)
+    effective_address &= 0x00000000FFFFFFFFULL;
+  memory_space *mem = NULL;
+  decode_space(space, thread, src1, mem, effective_address);
+  (void)mem;
+  assert(space == global_space || space == shared_space);
+
+  if (thread->m_dsm_remote) {
+    printf("GPGPU-Sim PTX: ERROR ** remote DSM red is not supported\n");
+    printf("  Instruction: %s\n", pI->to_string().c_str());
+    fprintf(stderr,
+            "GPGPU-Sim PTX: ERROR ** remote DSM red is not supported: %s\n",
+            pI->to_string().c_str());
+    abort();
+  }
+
+  thread->m_last_effective_address = effective_address;
+  thread->m_last_memory_space = space;
+  thread->m_last_dram_callback.function = red_callback;
+  thread->m_last_dram_callback.instruction = pI;
 }
 
 void rem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
@@ -5569,6 +6154,26 @@ void rem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   unsigned i_type = pI->get_type();
   src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
+
+  // Integer remainder by zero returns the dividend on NVIDIA hardware rather
+  // than raising SIGFPE.
+  bool int_divisor_zero = false;
+  switch (i_type) {
+    case S32_TYPE:
+    case U32_TYPE:
+      int_divisor_zero = (src2_data.u32 == 0);
+      break;
+    case S64_TYPE:
+    case U64_TYPE:
+      int_divisor_zero = (src2_data.u64 == 0);
+      break;
+    default:
+      break;
+  }
+  if (int_divisor_zero) {
+    thread->set_operand_value(dst, src1_data, i_type, thread, pI);
+    return;
+  }
 
   switch (i_type) {
     case S32_TYPE:
@@ -6103,7 +6708,13 @@ void setp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   a = thread->get_operand_value(src1, dst, type, thread, 1);
   b = thread->get_operand_value(src2, dst, type, thread, 1);
 
-  t = CmpOp(type, a, b, cmpop);
+  if (type == BF16_TYPE) {
+    a.f32 = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+    b.f32 = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+    t = CmpOp(F32_TYPE, a, b, cmpop);
+  } else {
+    t = CmpOp(type, a, b, cmpop);
+  }
 
   ptx_reg_t data;
 
@@ -6131,6 +6742,26 @@ void set_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   a = thread->get_operand_value(src1, dst, src_type, thread, 1);
   b = thread->get_operand_value(src2, dst, src_type, thread, 1);
+
+  if (src_type == BF16X2_TYPE && pI->get_type() == BF16X2_TYPE) {
+    ptx_reg_t lo, hi;
+    lo.f32 = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+    hi.f32 = f32_from_bf16_bits(static_cast<uint16_t>((a.u32 >> 16) & 0xFFFFu));
+    ptx_reg_t blo, bhi;
+    blo.f32 = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+    bhi.f32 = f32_from_bf16_bits(static_cast<uint16_t>((b.u32 >> 16) & 0xFFFFu));
+    int t_lo = CmpOp(F32_TYPE, lo, blo, cmpop);
+    int t_hi = CmpOp(F32_TYPE, hi, bhi, cmpop);
+    ptx_reg_t data;
+    data.u32 = ((t_hi != 0) ? 0x3F800000u : 0u) | ((t_lo != 0) ? 0x3F80u : 0u);
+    thread->set_operand_value(dst, data, BF16X2_TYPE, thread, pI);
+    return;
+  }
+  if (src_type == BF16_TYPE) {
+    a.f32 = f32_from_bf16_bits(static_cast<uint16_t>(a.u32 & 0xFFFFu));
+    b.f32 = f32_from_bf16_bits(static_cast<uint16_t>(b.u32 & 0xFFFFu));
+    src_type = F32_TYPE;
+  }
 
   // Take abs of first operand if needed
   if (pI->is_abs()) {
@@ -6807,6 +7438,23 @@ void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     case F16_TYPE:
       data.f16 = src1_data.f16 - src2_data.f16;
       break;  // assert(0); break;
+    case BF16_TYPE: {
+      float r = f32_from_bf16_bits(static_cast<uint16_t>(src1_data.u32 & 0xFFFFu)) -
+                f32_from_bf16_bits(static_cast<uint16_t>(src2_data.u32 & 0xFFFFu));
+      if (pI->is_relu()) r = relu_f32(r);
+      data.u32 = bf16_bits_from_f32(r, pI->rounding_mode());
+      break;
+    }
+    case BF16X2_TYPE: {
+      auto fn = [](float a, float b) { return a - b; };
+      data.u32 = bf16x2_apply(src1_data.u32, src2_data.u32, pI->rounding_mode(), +fn);
+      if (pI->is_relu()) {
+        uint16_t lo = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(data.u32 & 0xFFFFu)), pI->rounding_mode());
+        uint16_t hi = bf16_bits_from_f32(relu_f32(f32_from_bf16_bits(data.u32 >> 16)), pI->rounding_mode());
+        data.u32 = (uint32_t(hi) << 16) | lo;
+      }
+      break;
+    }
     case F32X2_TYPE: {
       uint32_t s1lo = static_cast<uint32_t>(src1_data.u64 & 0xFFFFFFFFu);
       uint32_t s1hi = static_cast<uint32_t>(src1_data.u64 >> 32);
@@ -7416,6 +8064,163 @@ void activemask_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   const operand_info &dst = pI->dst();
   thread->set_operand_value(dst, l_activemask_uint, U32_TYPE, thread, pI);
+}
+
+void lop3_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  ptx_reg_t src1_data, src2_data, src3_data, src4_data, data;
+
+  const operand_info &dst = pI->dst();
+  const operand_info &src1 = pI->src1();
+  const operand_info &src2 = pI->src2();
+  const operand_info &src3 = pI->src3();
+  const operand_info &src4 = pI->src4();
+
+  unsigned i_type = pI->get_type();
+  src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
+  src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
+  src3_data = thread->get_operand_value(src3, dst, i_type, thread, 1);
+  src4_data = thread->get_operand_value(src4, dst, i_type, thread, 1);
+
+  // 3-input logic function: per-bit index (a<<2)|(b<<1)|c into the 8-bit LUT.
+  unsigned a = src1_data.u32;
+  unsigned b = src2_data.u32;
+  unsigned c = src3_data.u32;
+  unsigned lut = src4_data.u32 & 0xFF;
+  unsigned r = 0;
+  for (int i = 0; i < 32; ++i) {
+    unsigned idx = (((a >> i) & 1) << 2) | (((b >> i) & 1) << 1) | ((c >> i) & 1);
+    r |= ((lut >> idx) & 1) << i;
+  }
+  data.u64 = r;
+  thread->set_operand_value(dst, data, i_type, thread, pI);
+}
+
+void redux_impl(const ptx_instruction *pI, core_t *core, warp_inst_t inst) {
+  // redux.sync.op.type d, a, membermask; -- warp reduction across the lanes
+  // named by membermask (like shfl, this is modeled as a whole-warp op).
+  unsigned i_type = pI->get_type();
+  int tid;
+  if (core->get_gpu()->is_functional_sim())
+    tid = inst.warp_id_func() * core->get_warp_size();
+  else
+    tid = inst.warp_id() * core->get_warp_size();
+
+  int lane = inst.current_lane();
+  ptx_thread_info *thread = core->get_thread_info()[tid + lane];
+
+  const operand_info &dst = pI->dst();
+  const operand_info &src1 = pI->src1();
+  const operand_info &src2 = pI->src2();
+  unsigned membermask =
+      (thread->get_operand_value(src2, dst, U32_TYPE, thread, 1)).u32;
+
+  int redux_op = ATOMIC_ADD;
+  bool use_nan = false;
+  bool use_abs = false;
+  for (int opt : pI->get_options()) {
+    switch (opt) {
+      case ATOMIC_ADD:
+      case ATOMIC_MIN:
+      case ATOMIC_MAX:
+      case ATOMIC_AND:
+      case ATOMIC_OR:
+      case ATOMIC_XOR:
+        redux_op = opt;
+        break;
+      case NAN_OPTION:
+        use_nan = true;
+        break;
+      case ABS_OPTION:
+        use_abs = true;
+        break;
+      default:
+        break;
+    }
+  }
+
+  bool is_f32 = (i_type == F32_TYPE);
+  bool first = true;
+  float facc = 0.0f;
+  int sacc = 0;
+  unsigned uacc = 0;
+  unsigned warp_sz = core->get_warp_size();
+
+  for (unsigned l = 0; l < warp_sz && l < 32; ++l) {
+    if (!(membermask & (1u << l)) || !inst.active(l)) continue;
+    ptx_thread_info *src = core->get_thread_info()[tid + l];
+    ptx_reg_t v = src->get_operand_value(src1, dst, i_type, src, 1);
+    if (is_f32) {
+      float f = v.f32;
+      if (use_abs) f = fabsf(f);
+      if (first) {
+        facc = f;
+      } else {
+        switch (redux_op) {
+          case ATOMIC_ADD:
+            facc = facc + f;
+            break;
+          case ATOMIC_MIN:
+            facc = (use_nan && (isnan(facc) || isnan(f))) ? NAN
+                                                        : fminf(facc, f);
+            break;
+          case ATOMIC_MAX:
+            facc = (use_nan && (isnan(facc) || isnan(f))) ? NAN
+                                                        : fmaxf(facc, f);
+            break;
+          default:
+            printf("GPGPU-Sim PTX: ERROR: redux f32 supports add/min/max\n");
+            assert(0);
+        }
+      }
+    } else if (i_type == S32_TYPE) {
+      int x = v.s32;
+      if (use_abs) x = abs(x);
+      if (first) {
+        sacc = x;
+      } else {
+        switch (redux_op) {
+          case ATOMIC_ADD: sacc += x; break;
+          case ATOMIC_MIN: sacc = x < sacc ? x : sacc; break;
+          case ATOMIC_MAX: sacc = x > sacc ? x : sacc; break;
+          case ATOMIC_AND: sacc &= x; break;
+          case ATOMIC_OR: sacc |= x; break;
+          case ATOMIC_XOR: sacc ^= x; break;
+          default: assert(0);
+        }
+      }
+    } else {
+      unsigned x = v.u32;
+      if (first) {
+        uacc = x;
+      } else {
+        switch (redux_op) {
+          case ATOMIC_ADD: uacc += x; break;
+          case ATOMIC_MIN: uacc = x < uacc ? x : uacc; break;
+          case ATOMIC_MAX: uacc = x > uacc ? x : uacc; break;
+          case ATOMIC_AND: uacc &= x; break;
+          case ATOMIC_OR: uacc |= x; break;
+          case ATOMIC_XOR: uacc ^= x; break;
+          default: assert(0);
+        }
+      }
+    }
+    first = false;
+  }
+
+  ptx_reg_t data;
+  if (is_f32)
+    data.f32 = facc;
+  else if (i_type == S32_TYPE)
+    data.s32 = sacc;
+  else
+    data.u32 = uacc;
+
+  // Every lane in membermask receives the result.
+  for (unsigned l = 0; l < warp_sz && l < 32; ++l) {
+    if (!(membermask & (1u << l)) || !inst.active(l)) continue;
+    ptx_thread_info *t = core->get_thread_info()[tid + l];
+    t->set_operand_value(dst, data, i_type, t, pI);
+  }
 }
 
 void xor_impl(const ptx_instruction *pI, ptx_thread_info *thread) {

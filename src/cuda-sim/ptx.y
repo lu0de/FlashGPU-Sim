@@ -67,6 +67,7 @@ class ptx_recognizer;
 %token  GLOBAL_DIRECTIVE
 %token  LOCAL_DIRECTIVE
 %token  LOC_DIRECTIVE
+%token  MAXCLUSTERRANK_DIRECTIVE
 %token  MAXNCTAPERSM_DIRECTIVE
 %token  MAXNNREG_DIRECTIVE
 %token  MAXNTID_DIRECTIVE
@@ -106,9 +107,13 @@ class ptx_recognizer;
 %token  F16_TYPE
 %token  F16X2_TYPE
 %token  BF16_TYPE
+%token  BF16X2_TYPE
 %token  TF32_TYPE
 %token  E4M3_TYPE
 %token  E5M2_TYPE
+%token  E4M3X2_TYPE
+%token  E5M2X2_TYPE
+%token  E2M1X2_TYPE
 %token  F32_TYPE
 %token  F32X2_TYPE
 %token  F64_TYPE
@@ -193,6 +198,7 @@ class ptx_recognizer;
 %token COMPLETE_TX_OPTION
 %token INIT_OPTION
 %token TRY_WAIT_OPTION
+%token TEST_WAIT_OPTION
 %token WAIT_OPTION
 %token PARITY_OPTION
 %token TMA_MBAR_COMPLETE_BYTES
@@ -224,6 +230,8 @@ class ptx_recognizer;
 %token  CTA_OPTION
 %token  SYS_OPTION
 %token  SC_OPTION
+%token  ACQ_REL_OPTION
+%token  RELU_OPTION
 %token  EXIT_OPTION
 %token  ABS_OPTION
 %token  TO_OPTION
@@ -274,6 +282,13 @@ class ptx_recognizer;
 %token	GPU_OPTION;
 %token	L2_CACHE_HINT_OPTION;
 %token	L2_OPTION;
+%token	FRACTIONAL_OPTION;
+%token	EVICT_OPTION;
+%token	SHIFTAMT_OPTION;
+%token	X8_OPTION;
+%token	X64_OPTION;
+%token	X128_OPTION;
+%token	UNDERSCORE;
 %token	ALIGNED_OPTION;
 %token	B1024_TYPE;
 %token	GENERIC_OPTION;
@@ -284,6 +299,7 @@ class ptx_recognizer;
 %token	BULK_GROUP_OPTION;
 %token	CLUSTER_OPTION;
 %token	MULTICAST_CLUSTER_OPTION;
+%token	MULTICAST_CLUSTER_ALL_OPTION;
 %token	INVAL_OPTION;
 %token	MBARRIER_INIT_OPTION;
 %token	M8N8_OPTION;
@@ -321,6 +337,7 @@ class ptx_recognizer;
 %token	TCGEN05_UNPACK_16B_OPTION;
 %token	TCGEN05_BEFORE_THREAD_SYNC_OPTION;
 %token	TCGEN05_AFTER_THREAD_SYNC_OPTION;
+%token	TCGEN05_COLLECTOR_OPTION;
 %token	TCGEN05_WAIT_LD_OPTION;
 %token	TCGEN05_WAIT_ST_OPTION;
 %type <int_value> function_decl_header
@@ -353,8 +370,11 @@ block_spec: MAXNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND {r
 										recognizer->func_header_info_int(",", $4);
 										recognizer->func_header_info_int(",", $6);
                                                                                 recognizer->maxnt_id($2, $4, $6);}
+	| MAXNTID_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxntid", $2); recognizer->maxnt_id($2, 1, 1); printf("GPGPU-Sim PTX: Warning: .maxntid single-dim form. \n"); }
 	| MINNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".minnctapersm", $2); printf("GPGPU-Sim PTX: Warning: .minnctapersm ignored. \n"); }
 	| MAXNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxnctapersm", $2); printf("GPGPU-Sim PTX: Warning: .maxnctapersm ignored. \n"); }
+	| MAXNNREG_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxnreg", $2); printf("GPGPU-Sim PTX: Warning: .maxnreg ignored. \n"); }
+	| MAXCLUSTERRANK_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxclusterrank", $2); printf("GPGPU-Sim PTX: Warning: .maxclusterrank ignored. \n"); }
 	| REQNTID_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".reqntid", $2); printf("GPGPU-Sim PTX: Warning: .reqntid ignored. \n"); }
 	| REQNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND { recognizer->func_header_info_int(".reqntid", $2); printf("GPGPU-Sim PTX: Warning: .reqntid ignored. \n"); }
 	| EXPLICITCLUSTER_DIRECTIVE { recognizer->func_header_info(".explicitcluster"); recognizer->set_explicit_cluster(); }
@@ -541,9 +561,13 @@ scalar_type: S8_TYPE { recognizer->add_scalar_type_spec( S8_TYPE ); }
 	| F16_TYPE   { recognizer->add_scalar_type_spec( F16_TYPE ); }
 	| F16X2_TYPE { recognizer->add_scalar_type_spec( F16X2_TYPE ); }
 	| BF16_TYPE  { recognizer->add_scalar_type_spec( BF16_TYPE ); }
+	| BF16X2_TYPE { recognizer->add_scalar_type_spec( BF16X2_TYPE ); }
 	| TF32_TYPE  { recognizer->add_scalar_type_spec( TF32_TYPE ); }
 	| E4M3_TYPE  { recognizer->add_scalar_type_spec( E4M3_TYPE ); }
 	| E5M2_TYPE  { recognizer->add_scalar_type_spec( E5M2_TYPE ); }
+	| E4M3X2_TYPE { recognizer->add_scalar_type_spec( E4M3X2_TYPE ); }
+	| E5M2X2_TYPE { recognizer->add_scalar_type_spec( E5M2X2_TYPE ); }
+	| E2M1X2_TYPE { recognizer->add_scalar_type_spec( E2M1X2_TYPE ); }
 	| F32_TYPE   { recognizer->add_scalar_type_spec( F32_TYPE ); }
 	| F32X2_TYPE { recognizer->add_scalar_type_spec( F32X2_TYPE ); }
 	| F64_TYPE   { recognizer->add_scalar_type_spec( F64_TYPE ); }
@@ -645,6 +669,7 @@ option: type_spec
 	| RED_OPTION { recognizer->add_option(RED_OPTION); }
 	| INIT_OPTION { recognizer->add_option(INIT_OPTION); }
 	| TRY_WAIT_OPTION { recognizer->add_option(TRY_WAIT_OPTION); }
+	| TEST_WAIT_OPTION { recognizer->add_option(TEST_WAIT_OPTION); }
 	| WAIT_OPTION { recognizer->add_option(WAIT_OPTION); }
 	| PARITY_OPTION { recognizer->add_option(PARITY_OPTION); }
 	| TMA_MBAR_COMPLETE_BYTES { recognizer->add_option(TMA_MBAR_COMPLETE_BYTES); }
@@ -660,6 +685,7 @@ option: type_spec
 	| CTA_OPTION { recognizer->add_option(CTA_OPTION); }
 	| SYS_OPTION { recognizer->add_option(SYS_OPTION); }
 	| SC_OPTION { recognizer->add_option(SC_OPTION); }
+	| ACQ_REL_OPTION { recognizer->add_option(ACQ_REL_OPTION); }
 	| GEOM_MODIFIER_1D { recognizer->add_option(GEOM_MODIFIER_1D); }
 	| GEOM_MODIFIER_2D { recognizer->add_option(GEOM_MODIFIER_2D); }
 	| GEOM_MODIFIER_3D { recognizer->add_option(GEOM_MODIFIER_3D); }
@@ -714,10 +740,17 @@ option: type_spec
 	| CP_FENCEPROXY_OPTION { recognizer->add_option(CP_FENCEPROXY_OPTION); }
 	| RELEASE_OPTION { recognizer->add_option(RELEASE_OPTION); }
 	| RELAXED_OPTION { recognizer->add_option(RELAXED_OPTION); }
+	| RELU_OPTION { recognizer->add_option(RELU_OPTION); }
 	| ACQUIRE_OPTION { recognizer->add_option(ACQUIRE_OPTION); }
 	| GPU_OPTION { recognizer->add_option(GPU_OPTION); }
 	| L2_CACHE_HINT_OPTION { recognizer->add_option(L2_CACHE_HINT_OPTION); }
 	| L2_OPTION { recognizer->add_option(L2_OPTION); }
+	| FRACTIONAL_OPTION { recognizer->add_option(FRACTIONAL_OPTION); }
+	| EVICT_OPTION { recognizer->add_option(EVICT_OPTION); }
+	| SHIFTAMT_OPTION { recognizer->add_option(SHIFTAMT_OPTION); }
+	| X8_OPTION { recognizer->add_option(X8_OPTION); }
+	| X64_OPTION { recognizer->add_option(X64_OPTION); }
+	| X128_OPTION { recognizer->add_option(X128_OPTION); }
 	| ALIGNED_OPTION { recognizer->add_option(ALIGNED_OPTION); }
 	| B1024_TYPE { recognizer->add_option(B1024_TYPE); }
 	| GENERIC_OPTION { recognizer->add_option(GENERIC_OPTION); }
@@ -727,6 +760,7 @@ option: type_spec
 	| READ_OPTION { recognizer->add_option(READ_OPTION); }
 	| BULK_GROUP_OPTION { recognizer->add_option(BULK_GROUP_OPTION); }
 	| CLUSTER_OPTION { recognizer->add_option(CLUSTER_OPTION); }
+	| MULTICAST_CLUSTER_ALL_OPTION { recognizer->add_option(MULTICAST_CLUSTER_ALL_OPTION); }
 	| MULTICAST_CLUSTER_OPTION { recognizer->add_option(MULTICAST_CLUSTER_OPTION); }
 	| INVAL_OPTION { recognizer->add_option(INVAL_OPTION); }
 	| MBARRIER_INIT_OPTION { recognizer->add_option(MBARRIER_INIT_OPTION); }
@@ -765,6 +799,7 @@ option: type_spec
 	| TCGEN05_UNPACK_16B_OPTION { recognizer->add_option(TCGEN05_UNPACK_16B_OPTION); }
 	| TCGEN05_BEFORE_THREAD_SYNC_OPTION { recognizer->add_option(TCGEN05_BEFORE_THREAD_SYNC_OPTION); }
 	| TCGEN05_AFTER_THREAD_SYNC_OPTION { recognizer->add_option(TCGEN05_AFTER_THREAD_SYNC_OPTION); }
+	| TCGEN05_COLLECTOR_OPTION { recognizer->add_option(TCGEN05_COLLECTOR_OPTION); }
 	;
 
 atomic_operation_spec: ATOMIC_AND { recognizer->add_option(ATOMIC_AND); }
@@ -841,6 +876,7 @@ operand_list: operand
 	| operand COMMA operand_list;
 
 operand: IDENTIFIER  { recognizer->add_scalar_operand( $1 ); }
+	| UNDERSCORE { recognizer->add_scalar_operand( "_" ); }
 	| EXCLAMATION IDENTIFIER { recognizer->add_neg_pred_operand( $2 ); }
 	| MINUS IDENTIFIER  { recognizer->add_scalar_operand( $2 ); recognizer->change_operand_neg(); }
 	| memory_operand
@@ -869,6 +905,7 @@ vector_operand: LEFT_BRACE { recognizer->begin_vector_operand(); }
 	;
 
 vector_component: IDENTIFIER { recognizer->add_scalar_operand($1); }
+		| UNDERSCORE { recognizer->add_scalar_operand("_"); }
 		| INT_OPERAND { recognizer->add_literal_int($1); }
 		| FLOAT_OPERAND { recognizer->add_literal_float($1); }
 		| DOUBLE_OPERAND { recognizer->add_literal_double($1); }

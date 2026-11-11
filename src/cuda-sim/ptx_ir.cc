@@ -38,6 +38,7 @@ typedef void *yyscan_t;
 #include <stdlib.h>
 #include <algorithm>
 #include <list>
+#include <iterator>
 #include <map>
 #include <set>
 #include <vector>
@@ -596,6 +597,25 @@ void function_info::connect_basic_blocks()  // iterate across m_basic_blocks of
     ptx_instruction *pI = (*bb_itr)->ptx_end;
     if ((*bb_itr)->is_exit)  // reached last basic block, no successors to link
       continue;
+    if (pI == NULL) {
+      // A block can end up without a terminating instruction when its leader
+      // is a label whose only following instructions are further labels (as
+      // produced by inline asm emitting consecutive label groups). Treat the
+      // block as falling through to the next block instead of dereferencing
+      // the NULL ptx_end.
+      basic_block_t *p_bb = *bb_itr;
+      printf("GPGPU-Sim PTX: Warning basic block %d in '%s' has no end "
+             "instruction (begin PC=%u, label=%d); linking to next block.\n",
+             p_bb->bb_id, m_name.c_str(),
+             p_bb->ptx_begin ? p_bb->ptx_begin->get_PC() : 0,
+             p_bb->ptx_begin ? int(p_bb->ptx_begin->is_label()) : -1);
+      basic_block_t *next_bb =
+          std::next(bb_itr) != m_basic_blocks.end() ? *std::next(bb_itr)
+                                                  : exit_bb;
+      p_bb->successor_ids.insert(next_bb->bb_id);
+      next_bb->predecessor_ids.insert(p_bb->bb_id);
+      continue;
+    }
     if (pI->get_opcode() == RETP_OP || pI->get_opcode() == RET_OP ||
         pI->get_opcode() == EXIT_OP) {
       (*bb_itr)->successor_ids.insert(exit_bb->bb_id);
@@ -652,6 +672,8 @@ bool function_info::connect_break_targets()  // connecting break instructions
     ptx_instruction *pI = p_bb->ptx_end;
     if (p_bb->is_exit)  // reached last basic block, no successors to link
       continue;
+    if (pI == NULL)
+      continue;  // guard: label-only block, handled in connect_basic_blocks
     if (pI->get_opcode() == BREAK_OP) {
       // backup existing successor_ids for stability check
       std::set<int> orig_successor_ids = p_bb->successor_ids;
@@ -1151,6 +1173,10 @@ unsigned type_info_key::type_decode(int type, size_t &size, int &basic_type) {
       size = 32;  // Two f16 values packed in 32 bits
       basic_type = -1;
       return 17;  // Use 17 to avoid conflict with PRED_TYPE (11) and other types
+    case BF16X2_TYPE:
+      size = 32;  // Two bf16 values packed in 32 bits
+      basic_type = -1;
+      return 24;  // 17-23 already used by F16X2/F32X2/B1/BF16/TF32/E4M3/E5M2
     case F32X2_TYPE:
       size = 64;  // two f32 values packed in 64 bits
       basic_type = -1;
@@ -1187,6 +1213,18 @@ unsigned type_info_key::type_decode(int type, size_t &size, int &basic_type) {
       size = 8;
       basic_type = -1;
       return 23;
+    case E4M3X2_TYPE:
+      size = 16;
+      basic_type = -1;
+      return 25;
+    case E5M2X2_TYPE:
+      size = 16;
+      basic_type = -1;
+      return 26;
+    case E2M1X2_TYPE:
+      size = 8;
+      basic_type = -1;
+      return 27;
     case B16_TYPE:
       size = 16;
       basic_type = 0;
@@ -1311,6 +1349,8 @@ static std::list<operand_info> check_operands(
       (opcode == FMA_OP) ||
       (opcode == WGMMA_MMA_ASYNC_OP) ||
       (opcode == WGMMA_MMA_ASYNC_SP_OP) ||
+      (opcode == CLC_QUERY_CANCELED_OP) ||
+      (opcode == CLC_QUERY_FIRST_CTA_OP) ||
       (opcode == DP4A_OP) || (opcode == VMIN_OP) || (opcode == VMAX_OP)) {
     // just make sure these do not have have const operands...
     if (!g_warn_literal_operands_two_type_inst) {
@@ -1388,6 +1428,7 @@ ptx_instruction::ptx_instruction(
   m_exit = false;
   m_abs = false;
   m_neg = false;
+  m_relu = false;
   m_to_option = false;
   m_cache_option = 0;
   m_rounding_mode = RN_OPTION;
@@ -1524,6 +1565,7 @@ ptx_instruction::ptx_instruction(
       case INIT_OPTION:
       case INVAL_OPTION:
       case TRY_WAIT_OPTION:
+      case TEST_WAIT_OPTION:
       case EXPECT_TX_OPTION:
       case COMPLETE_TX_OPTION:
         m_barrier_op = last_ptx_inst_option;
@@ -1535,6 +1577,7 @@ ptx_instruction::ptx_instruction(
         m_parity_op = true;
         break;
       case TMA_MBAR_COMPLETE_BYTES:
+        if (opcode == CLC_TRY_CANCEL_OP) m_barrier_op = COMPLETE_TX_OPTION;
       case NOINC_OPTION:
       case COMMIT_GROUP_OPTION:
       case WAIT_GROUP_OPTION:
@@ -1663,6 +1706,9 @@ ptx_instruction::ptx_instruction(
       case SC_OPTION:
         // fence.sc.* : sequential-consistency order; scope is a later option.
         break;
+      case ACQ_REL_OPTION:
+        // fence.acq_rel.* : acquire-release order; same no-op classification as fence.sc.
+        break;
       case FTZ_OPTION:
         break;
       case EXIT_OPTION:
@@ -1670,6 +1716,9 @@ ptx_instruction::ptx_instruction(
         break;
       case ABS_OPTION:
         m_abs = true;
+        break;
+      case RELU_OPTION:
+        m_relu = true;
         break;
       case NEG_OPTION:
         m_neg = true;
@@ -1743,6 +1792,7 @@ ptx_instruction::ptx_instruction(
       case BULK_GROUP_OPTION:
       case CLUSTER_OPTION:
       case MULTICAST_CLUSTER_OPTION:
+      case MULTICAST_CLUSTER_ALL_OPTION:
       case M8N8_OPTION:
       case MBARRIER_INIT_OPTION:
       case TRANS_OPTION:
@@ -1779,8 +1829,15 @@ ptx_instruction::ptx_instruction(
       case TCGEN05_UNPACK_16B_OPTION:
       case TCGEN05_BEFORE_THREAD_SYNC_OPTION:
       case TCGEN05_AFTER_THREAD_SYNC_OPTION:
+      case TCGEN05_COLLECTOR_OPTION:
       case TCGEN05_WAIT_LD_OPTION:
       case TCGEN05_WAIT_ST_OPTION:
+      case FRACTIONAL_OPTION:
+      case EVICT_OPTION:
+      case SHIFTAMT_OPTION:
+      case X8_OPTION:
+      case X64_OPTION:
+      case X128_OPTION:
         break;
       default:
         printf("Error: Unsupported PTX instruction option (0x%x) for opcode %s\n",

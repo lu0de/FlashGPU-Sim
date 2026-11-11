@@ -958,6 +958,7 @@ void ptx_instruction::set_fp_or_int_archop() {
       (m_opcode == NOP_OP) || (m_opcode == EXIT_OP) || (m_opcode == CALLP_OP) ||
       (m_opcode == CALL_OP) || (m_opcode == TENSORMAP_OP) || (m_opcode == FENCE_OP) ||
       (m_opcode == GRIDDEPCONTROL_OP) || (m_opcode == ELECT_OP) ||
+      (m_opcode == TRAP_OP) ||
       (m_opcode == LDMATRIX_OP) || (m_opcode == STMATRIX_OP) ||
       (m_opcode == CP_ASYNC_OP) || (m_opcode == CP_ASYNC_COMMIT_OP) ||
       (m_opcode == CP_ASYNC_WAIT_OP) ||
@@ -999,6 +1000,7 @@ void ptx_instruction::set_mul_div_or_other_archop() {
       (m_opcode != RETP_OP) && (m_opcode != RET_OP) && (m_opcode != CALLP_OP) &&
       (m_opcode != CALL_OP) && (m_opcode != TENSORMAP_OP) && (m_opcode != FENCE_OP) &&
       (m_opcode != GRIDDEPCONTROL_OP) && (m_opcode != ELECT_OP) &&
+      (m_opcode != TRAP_OP) &&
       (m_opcode != LDMATRIX_OP) && (m_opcode != STMATRIX_OP) &&
       (m_opcode != CP_ASYNC_OP) && (m_opcode != CP_ASYNC_COMMIT_OP) &&
       (m_opcode != CP_ASYNC_WAIT_OP) &&
@@ -1429,7 +1431,8 @@ void ptx_instruction::set_opcode_and_latency() {
       }
       break;
     case CVT_OP:
-      if (m_scalar_type.size() == 2 && get_type() == F16X2_TYPE &&
+      if (m_scalar_type.size() == 2 &&
+          (get_type() == F16X2_TYPE || get_type() == BF16X2_TYPE) &&
           get_type2() == F32_TYPE) {
         latency = gpgpu_ctx->func_sim->opcode_latency_cvt_f16x2_f32;
         initiation_interval =
@@ -1486,12 +1489,14 @@ void ptx_instruction::set_opcode_and_latency() {
       mem_op = TEX;
       break;
     case ATOM_OP:
+    case RED_OP:
       op = LOAD_OP;
       break;
     case BAR_OP:
       op = BARRIER_OP;
       break;
     case MBAR_OP:
+    case CLC_TRY_CANCEL_OP:
       op = MBARRIER_OP;
       break;
     case TMA_OP:
@@ -1552,7 +1557,8 @@ void ptx_instruction::set_opcode_and_latency() {
         op = TENSOR_MAP_OP;
         latency = tensormap_latency[2];
         initiation_interval = tensormap_init[2];
-      } else if (std::find(opts.begin(), opts.end(), SC_OPTION) != opts.end()) {
+      } else if (std::find(opts.begin(), opts.end(), SC_OPTION) != opts.end() ||
+                 std::find(opts.begin(), opts.end(), ACQ_REL_OPTION) != opts.end()) {
         op = MEMORY_BARRIER_OP;
       }
       break;
@@ -2094,7 +2100,7 @@ void ptx_instruction::pre_decode() {
       // else if( m_opcode == ST_OP )
       else if (m_opcode == MMA_ST_OP || m_opcode == ST_OP)
         cache_op = CACHE_WRITE_BACK;
-      else if (m_opcode == ATOM_OP)
+      else if (m_opcode == ATOM_OP || m_opcode == RED_OP)
         cache_op = CACHE_GLOBAL;
       break;
   }
@@ -2922,13 +2928,15 @@ using flash_gpgpu_sim::wgmma_wait_group_impl;
                         false /*not atomic*/);
     }
 
-    if (pI->get_opcode() == ATOM_OP) {
+    // red is modelled with atom's memory timing (same atomic callback).
+    if (pI->get_opcode() == ATOM_OP || pI->get_opcode() == RED_OP) {
       insn_memaddr = last_eaddr();
       insn_space = last_space();
       inst.add_callback(lane_id, last_callback().function,
                         last_callback().instruction, this, true /*atomic*/);
       unsigned to_type = pI->get_type();
       insn_data_size = datatype2size(to_type);
+      if (pI->get_opcode() == RED_OP) insn_memory_op = memory_load;
     }
 
     if (pI->get_opcode() == TEX_OP) {

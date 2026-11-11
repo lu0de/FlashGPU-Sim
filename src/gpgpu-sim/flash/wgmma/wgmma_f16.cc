@@ -1,10 +1,13 @@
 #include "tensor_wgmma.h"
 
 #include <cassert>
+#include <climits>
 #include <cstdint>
+#include <cstring>
 
 #include "../../../abstract_hardware_model.h"
 #include "../../../cuda-sim/ptx_ir.h"
+#include "../lowp_float.h"
 #include "../mma/tensor_mma.h"
 
 class ptx_recognizer;
@@ -16,18 +19,40 @@ namespace flash_gpgpu_sim {
 
 namespace {
 
-uint16_t packed_f16(const ptx_reg_t &reg, int half_index) {
-  if (half_index == 0)
-    return static_cast<uint16_t>(reg.u32 & 0xFFFFu);
-  return static_cast<uint16_t>((reg.u32 >> 16) & 0xFFFFu);
+template <unsigned ESZ> uint32_t packed_elem(const ptx_reg_t &reg, int index) {
+  return (reg.u32 >> (index * ESZ * 8)) & ((1u << (ESZ * 8)) - 1u);
 }
 
-} // namespace
+template <> uint32_t packed_elem<4>(const ptx_reg_t &reg, int index) {
+  (void)index;
+  return reg.u32;
+}
 
-void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
-                             warp_inst_t &inst) {
+float bits_to_f32(uint32_t bits) {
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+int32_t saturate_s32(int64_t value) {
+  if (value > INT_MAX)
+    return INT_MAX;
+  if (value < INT_MIN)
+    return INT_MIN;
+  return static_cast<int32_t>(value);
+}
+
+// Generic dense WGMMA implementation. ESZ is the operand element size in
+// bytes, K the instruction K dimension, AConv/BConv convert one raw element
+// (zero-extended to 32 bits) into the accumulation domain, and AccT is the
+// accumulator type (float or int32_t).
+template <unsigned ESZ, int K, typename AccT, bool IntAccum, typename AConv,
+          typename BConv>
+void wgmma_m64nXkY_generic_impl(const ptx_instruction *pI, core_t *core,
+                                warp_inst_t &inst, AConv a_to_acc,
+                                BConv b_to_acc, bool has_trans) {
   constexpr int M = 64;
-  constexpr int K = 16;
+  constexpr int EPR = 4 / ESZ; // elements per 32-bit A register
 
   const operand_info &dst = pI->operand_lookup(0);
   const operand_info &src_a = pI->operand_lookup(1);
@@ -39,12 +64,12 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
     return;
   }
 
-  float A_mat[M * K];
-  float B_mat[256 * K];
+  AccT A_mat[M * K];
+  AccT B_mat[256 * K];
   for (int i = 0; i < M * K; ++i)
-    A_mat[i] = 0.0f;
+    A_mat[i] = AccT{};
   for (int i = 0; i < N * K; ++i)
-    B_mat[i] = 0.0f;
+    B_mat[i] = AccT{};
 
   unsigned thread_count = wgmma_thread_count(core, inst);
   ptx_thread_info *representative_thread = wgmma_thread(core, inst, 0);
@@ -67,25 +92,27 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
         representative_thread, 0);
     scale_b = scale.s32 == -1 ? -1 : 1;
   }
-  if (a_from_register) {
-    if (operand_count > 6) {
-      ptx_reg_t major = representative_thread->get_operand_value(
-          pI->operand_lookup(6), pI->operand_lookup(6), S32_TYPE,
-          representative_thread, 0);
-      major_b = major.s32;
-    }
-  } else {
-    if (operand_count > 6) {
-      ptx_reg_t major = representative_thread->get_operand_value(
-          pI->operand_lookup(6), pI->operand_lookup(6), S32_TYPE,
-          representative_thread, 0);
-      major_a = major.s32;
-    }
-    if (operand_count > 7) {
-      ptx_reg_t major = representative_thread->get_operand_value(
-          pI->operand_lookup(7), pI->operand_lookup(7), S32_TYPE,
-          representative_thread, 0);
-      major_b = major.s32;
+  if (has_trans) {
+    if (a_from_register) {
+      if (operand_count > 6) {
+        ptx_reg_t major = representative_thread->get_operand_value(
+            pI->operand_lookup(6), pI->operand_lookup(6), S32_TYPE,
+            representative_thread, 0);
+        major_b = major.s32;
+      }
+    } else {
+      if (operand_count > 6) {
+        ptx_reg_t major = representative_thread->get_operand_value(
+            pI->operand_lookup(6), pI->operand_lookup(6), S32_TYPE,
+            representative_thread, 0);
+        major_a = major.s32;
+      }
+      if (operand_count > 7) {
+        ptx_reg_t major = representative_thread->get_operand_value(
+            pI->operand_lookup(7), pI->operand_lookup(7), S32_TYPE,
+            representative_thread, 0);
+        major_b = major.s32;
+      }
     }
   }
 
@@ -95,15 +122,12 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
 
   for (int col = 0; col < N; ++col) {
     for (int k = 0; k < K; ++k) {
-      uint16_t b_bits = 0;
+      uint32_t b_bits = 0;
       unsigned b_smem_addr =
-          major_b == 0
-              ? wgmma_gmma_k_major_smem_addr(b_desc, col, k, sizeof(uint16_t),
-                                             K)
-              : wgmma_gmma_mn_major_smem_addr(b_desc, col, k, sizeof(uint16_t));
-      representative_thread->m_shared_mem->read(b_smem_addr, sizeof(b_bits),
-                                                &b_bits);
-      B_mat[col * K + k] = scale_b * mma_f16_to_f32(b_bits);
+          major_b == 0 ? wgmma_gmma_k_major_smem_addr(b_desc, col, k, ESZ, K)
+                       : wgmma_gmma_mn_major_smem_addr(b_desc, col, k, ESZ);
+      representative_thread->m_shared_mem->read(b_smem_addr, ESZ, &b_bits);
+      B_mat[col * K + k] = static_cast<AccT>(scale_b * b_to_acc(b_bits));
     }
   }
 
@@ -124,12 +148,11 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
         int reg_row_block = reg & 0x1;
         int reg_k_block = (reg >> 1) & 0x1;
         int row = tid_row + 16 * tid_m_block + 8 * reg_row_block;
-        int k0 = 2 * tid_mma_col + 8 * reg_k_block;
+        int k0 = EPR * tid_mma_col + (K / 2) * reg_k_block;
 
-        A_mat[row * K + k0] =
-            scale_a * mma_f16_to_f32(packed_f16(a_regs[reg], 0));
-        A_mat[row * K + k0 + 1] =
-            scale_a * mma_f16_to_f32(packed_f16(a_regs[reg], 1));
+        for (int e = 0; e < EPR; ++e)
+          A_mat[row * K + k0 + e] = static_cast<AccT>(
+              scale_a * a_to_acc(packed_elem<ESZ>(a_regs[reg], e)));
       }
     }
   } else {
@@ -138,15 +161,12 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
     uint64_t a_desc = static_cast<uint64_t>(a_desc_reg.u64);
     for (int row = 0; row < M; ++row) {
       for (int k = 0; k < K; ++k) {
-        uint16_t a_bits = 0;
+        uint32_t a_bits = 0;
         unsigned a_smem_addr =
-            major_a == 0 ? wgmma_gmma_k_major_smem_addr(a_desc, row, k,
-                                                        sizeof(uint16_t), K)
-                         : wgmma_gmma_mn_major_smem_addr(a_desc, row, k,
-                                                         sizeof(uint16_t));
-        representative_thread->m_shared_mem->read(a_smem_addr, sizeof(a_bits),
-                                                  &a_bits);
-        A_mat[row * K + k] = scale_a * mma_f16_to_f32(a_bits);
+            major_a == 0 ? wgmma_gmma_k_major_smem_addr(a_desc, row, k, ESZ, K)
+                         : wgmma_gmma_mn_major_smem_addr(a_desc, row, k, ESZ);
+        representative_thread->m_shared_mem->read(a_smem_addr, ESZ, &a_bits);
+        A_mat[row * K + k] = static_cast<AccT>(scale_a * a_to_acc(a_bits));
       }
     }
   }
@@ -167,15 +187,90 @@ void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
       wgmma_m64n8_accumulator_coord(lane, reg % 4, row, col_in_tile);
       int col = static_cast<int>((reg / 4) * 8) + col_in_tile;
 
-      float product = 0.0f;
-      for (int k = 0; k < K; ++k)
-        product += A_mat[row * K + k] * B_mat[col * K + k];
-
       ptx_reg_t d_reg;
-      d_reg.f32 = product + (include_c ? c_reg.f32 : 0.0f);
+      if (IntAccum) {
+        int64_t product = 0;
+        for (int k = 0; k < K; ++k)
+          product += static_cast<int64_t>(A_mat[row * K + k]) *
+                     static_cast<int64_t>(B_mat[col * K + k]);
+        int64_t result = product + (include_c ? c_reg.s32 : 0);
+        d_reg.s32 = pI->get_wgmma_saturate()
+                        ? saturate_s32(result)
+                        : static_cast<int32_t>(static_cast<uint32_t>(result));
+      } else {
+        float product = 0.0f;
+        for (int k = 0; k < K; ++k)
+          product += static_cast<float>(A_mat[row * K + k]) *
+                     static_cast<float>(B_mat[col * K + k]);
+        d_reg.f32 = product + (include_c ? c_reg.f32 : 0.0f);
+      }
       thread->set_reg(dst.vec_symbol(reg), d_reg);
     }
   }
+}
+
+} // namespace
+
+void wgmma_m64nXk16_f16_impl(const ptx_instruction *pI, core_t *core,
+                             warp_inst_t &inst) {
+  wgmma_m64nXkY_generic_impl<2, 16, float, false>(
+      pI, core, inst,
+      [](uint32_t bits) { return mma_f16_to_f32(static_cast<uint16_t>(bits)); },
+      [](uint32_t bits) { return mma_f16_to_f32(static_cast<uint16_t>(bits)); },
+      true);
+}
+
+void wgmma_m64nXk16_bf16_impl(const ptx_instruction *pI, core_t *core,
+                              warp_inst_t &inst) {
+  wgmma_m64nXkY_generic_impl<2, 16, float, false>(
+      pI, core, inst,
+      [](uint32_t bits) {
+        return mma_bf16_to_f32(static_cast<uint16_t>(bits));
+      },
+      [](uint32_t bits) {
+        return mma_bf16_to_f32(static_cast<uint16_t>(bits));
+      },
+      true);
+}
+
+void wgmma_m64nXk8_tf32_impl(const ptx_instruction *pI, core_t *core,
+                             warp_inst_t &inst) {
+  wgmma_m64nXkY_generic_impl<4, 8, float, false>(
+      pI, core, inst,
+      [](uint32_t bits) { return mma_tf32_round(bits_to_f32(bits)); },
+      [](uint32_t bits) { return mma_tf32_round(bits_to_f32(bits)); }, false);
+}
+
+void wgmma_m64nXk32_fp8_impl(const ptx_instruction *pI, core_t *core,
+                             warp_inst_t &inst, bool a_is_e4m3,
+                             bool b_is_e4m3) {
+  wgmma_m64nXkY_generic_impl<1, 32, float, false>(
+      pI, core, inst,
+      [a_is_e4m3](uint32_t bits) {
+        return fp8_to_f32(static_cast<uint8_t>(bits), a_is_e4m3);
+      },
+      [b_is_e4m3](uint32_t bits) {
+        return fp8_to_f32(static_cast<uint8_t>(bits), b_is_e4m3);
+      },
+      false);
+}
+
+void wgmma_m64nXk32_int8_impl(const ptx_instruction *pI, core_t *core,
+                              warp_inst_t &inst, bool a_is_signed,
+                              bool b_is_signed) {
+  auto to_i32 = [](uint32_t bits, bool is_signed) {
+    return is_signed ? static_cast<int32_t>(static_cast<int8_t>(bits))
+                     : static_cast<int32_t>(static_cast<uint8_t>(bits));
+  };
+  wgmma_m64nXkY_generic_impl<1, 32, int32_t, true>(
+      pI, core, inst,
+      [&to_i32, a_is_signed](uint32_t bits) {
+        return to_i32(bits, a_is_signed);
+      },
+      [&to_i32, b_is_signed](uint32_t bits) {
+        return to_i32(bits, b_is_signed);
+      },
+      false);
 }
 
 } // namespace flash_gpgpu_sim

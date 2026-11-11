@@ -1294,6 +1294,8 @@ class barrier_set_t {
   void note_peer_smem_access(unsigned warp_id, unsigned long long address);
   void poll_hang_preventers();
 
+  flash_gpgpu_sim::mbarrier_manager_t &get_mbarrier_manager() { return m_mbarrier_manager; }
+
   // Ordinary cp.async wait_group uses this only as a scheduler wait state.
   void wait_cp_async_group(unsigned warp_id);
   void release_cp_async_warp(unsigned warp_id);
@@ -2997,6 +2999,7 @@ class shader_core_mem_fetch_allocator : public mem_fetch_allocator {
 
 class shader_core_ctx : public core_t {
  public:
+  barrier_set_t *get_barriers() { return &m_barriers; }
   // creator:
   shader_core_ctx(class gpgpu_sim *gpu, class simt_core_cluster *cluster,
                   unsigned shader_id, unsigned tpc_id,

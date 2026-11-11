@@ -393,6 +393,33 @@ void ptx_recognizer::add_identifier(const char *identifier, int array_dim,
         arch_regnum = 0;
       }
       g_last_symbol->set_regno(regnum, arch_regnum);
+
+      // Vector register component aliases: declaring `.reg .v2/.v4 .type mx;`
+      // also declares the scalar symbols mx.x/.y(/.z/.w), used by inline-asm
+      // component access such as `max.f32 mx.x, %f1, %f2;`.
+      int vwidth = 0;
+      for (std::list<int>::const_iterator o = g_options.begin();
+           o != g_options.end(); ++o) {
+        if (*o == V2_TYPE) vwidth = 2;
+        if (*o == V3_TYPE) vwidth = 3;
+        if (*o == V4_TYPE) vwidth = 4;
+      }
+      if (vwidth >= 2 && g_scalar_type_spec != -1) {
+        static const char comp_name[] = {'x', 'y', 'z', 'w'};
+        type_info *comp_type = g_current_symbol_table->add_type(
+            g_space_spec, g_scalar_type_spec, -1, g_alignment_spec,
+            g_extern_spec);
+        for (int c = 0; c < vwidth; ++c) {
+          std::string cname =
+              std::string(identifier) + "." + comp_name[c];
+          if (!check_for_duplicates(cname.c_str())) {
+            symbol *comp_sym = g_current_symbol_table->add_variable(
+                strdup(cname.c_str()), comp_type, num_bits / 8 / vwidth,
+                gpgpu_ctx->g_filename, ptx_get_lineno(scanner));
+            comp_sym->set_regno(g_current_symbol_table->next_reg_num(), -1);
+          }
+        }
+      }
     } break;
     case shared_space:
       printf("GPGPU-Sim PTX: allocating shared region for \"%s\" ", identifier);
@@ -606,6 +633,7 @@ void ptx_recognizer::add_scalar_type_spec(int type_spec) {
     case U8_TYPE:
     case E4M3_TYPE:
     case E5M2_TYPE:
+      case E2M1X2_TYPE:
       g_size = 1;
       break;
     case B16_TYPE:
@@ -613,6 +641,8 @@ void ptx_recognizer::add_scalar_type_spec(int type_spec) {
     case U16_TYPE:
     case F16_TYPE:
     case BF16_TYPE:
+    case E4M3X2_TYPE:
+    case E5M2X2_TYPE:
       g_size = 2;
       break;
     case B32_TYPE:
@@ -648,9 +678,12 @@ void ptx_recognizer::add_scalar_type_spec(int type_spec) {
             (g_opcode == FMA_OP) ||
             (g_opcode == WGMMA_MMA_ASYNC_OP) ||
             (g_opcode == WGMMA_MMA_ASYNC_SP_OP) ||
-            (g_opcode == DP4A_OP) || (g_opcode == VMIN_OP) || (g_opcode == VMAX_OP),
-        "only cvt, set, slct, tex, mma, fma, wgmma, vmin, vmax and dp4a can have "
-        "more than one type specifier.");
+            (g_opcode == DP4A_OP) || (g_opcode == VMIN_OP) || (g_opcode == VMAX_OP) ||
+            (g_opcode == CLC_QUERY_CANCELED_OP) ||
+            (g_opcode == CLC_QUERY_FIRST_CTA_OP),
+        "only cvt, set, slct, tex, mma, fma, wgmma, vmin, vmax, dp4a and "
+        "clusterlaunchcontrol.query_cancel.is_canceled can have more than "
+        "one type specifier.");
   }
   g_scalar_type_spec = type_spec;
 }
@@ -724,6 +757,13 @@ void ptx_recognizer::add_2vector_operand(const char *d1, const char *d2) {
   PTX_PARSE_GPPRINTF("add_2vector_operand");
   const symbol *s1 = g_current_symbol_table->lookup(d1);
   const symbol *s2 = g_current_symbol_table->lookup(d2);
+  if (s1 == NULL && strcmp(d1, "_") == 0) {
+    // '_' write-discard pseudo operand used as vector component (e.g.
+    // `elect.sync _|%p`): declare a throwaway register like scalar '_'.
+    s1 = g_current_symbol_table->add_variable(d1, NULL, 0,
+                                              gpgpu_ctx->g_filename,
+                                              ptx_get_lineno(scanner));
+  }
   parse_assert(s1 != NULL && s2 != NULL,
                "v2 component(s) missing declarations.");
   g_operands.push_back(operand_info(s1, s2, NULL, NULL, gpgpu_ctx));
@@ -853,7 +893,9 @@ bool is_integer_scalar_type(int type) {
 
 bool is_float_scalar_type(int type) {
   return type == F16_TYPE || type == F32_TYPE || type == F64_TYPE ||
-         type == FF64_TYPE || type == BF16_TYPE || type == TF32_TYPE;
+         type == FF64_TYPE || type == BF16_TYPE || type == TF32_TYPE ||
+         type == E4M3_TYPE || type == E5M2_TYPE || type == E4M3X2_TYPE ||
+         type == E5M2X2_TYPE || type == E2M1X2_TYPE;
 }
 
 unsigned scalar_type_bits(int type) {
@@ -890,29 +932,87 @@ void ptx_recognizer::end_vector_operand() {
     const bool is_store_source =
         g_opcode == ST_OP && g_vector_operand_start == 1;
     const bool is_mov_pack = g_opcode == MOV_OP && g_vector_operand_start == 1 &&
-                             g_scalar_type_spec == B64_TYPE;
-    parse_assert(is_store_source || is_mov_pack,
-                 "literal vector operands are only valid as store sources "
-                 "or mov.b64 pack sources.");
+                             (g_scalar_type_spec == B64_TYPE ||
+                              g_scalar_type_spec == B32_TYPE ||
+                              g_scalar_type_spec == B16_TYPE);
+    // MMA C operand form `{%r, 0., %r, 0.}` (and `0`/`0f00000000`): rewrite
+    // all-zero literal components to a shared read-only placeholder register
+    // that is never written (register file default is 0).
+    if (g_opcode == MMA_OP || g_opcode == TENSOR_MMA_OP) {
+      bool all_zero = true;
+      for (const operand_info &component : components) {
+        if (!component.is_literal()) continue;
+        const ptx_reg_t v = component.get_literal_value();
+        const bool zero =
+            (component.get_type() == float_op_t && v.f32 == 0.0f) ||
+            (component.get_type() == double_op_t && v.f64 == 0.0) ||
+            (component.get_type() == int_t && v.s64 == 0) ||
+            (component.get_type() == unsigned_t && v.u64 == 0);
+        if (!zero) all_zero = false;
+      }
+      if (all_zero) {
+        const type_info *ztype = NULL;
+        for (const operand_info &component : components) {
+          if (!component.is_literal() && component.get_symbol() != NULL &&
+              component.get_symbol()->type() != NULL) {
+            ztype = component.get_symbol()->type();
+            break;
+          }
+        }
+        if (ztype != NULL) {
+          const symbol *zsym = g_current_symbol_table->lookup("__lit_zero");
+          if (zsym == NULL) {
+            zsym = g_current_symbol_table->add_variable(
+                "__lit_zero", ztype,
+                scalar_type_bits(ztype->get_key().scalar_type()) / 8,
+                gpgpu_ctx->g_filename, ptx_get_lineno(scanner));
+            const_cast<symbol *>(zsym)
+                ->set_regno(g_current_symbol_table->next_reg_num(), -1);
+          }
+          for (std::list<operand_info>::iterator it = g_operands.begin();
+               it != g_operands.end(); ++it) {
+            int idx = static_cast<int>(
+                std::distance(g_operands.begin(), it));
+            if (idx >= g_vector_operand_start && it->is_literal())
+              *it = operand_info(zsym, gpgpu_ctx);
+          }
+          for (operand_info &component : components) {
+            if (component.is_literal())
+              component = operand_info(zsym, gpgpu_ctx);
+          }
+          has_literal = false;
+        }
+      }
+    }
+    if (has_literal)
+      parse_assert(is_store_source || is_mov_pack,
+                   "literal vector operands are only valid as store sources "
+                   "or mov.b64/mov.b32/mov.b16 pack sources.");
 
     if (is_mov_pack) {
       parse_assert(components.size() == 2,
-                   "mov.b64 pack source requires two 32-bit components.");
+                   "mov pack source requires two components.");
+      const bool is_b64 = g_scalar_type_spec == B64_TYPE;
+      const bool is_b16 = g_scalar_type_spec == B16_TYPE;
       for (const operand_info &component : components) {
         if (component.is_literal()) {
           const enum operand_type type = component.get_type();
           parse_assert(type == int_t || type == unsigned_t,
-                       "mov.b64 pack literals must be integers.");
+                       "mov pack literals must be integers.");
           continue;
         }
         const symbol *symbol = component.get_symbol();
         parse_assert(symbol != NULL && symbol->type() != NULL,
-                     "mov.b64 pack register component has no type.");
+                     "mov pack register component has no type.");
         const int register_type = symbol->type()->get_key().scalar_type();
-        parse_assert(scalar_type_bits(register_type) == 32,
-                     "mov.b64 pack register components must be 32 bits.");
+        parse_assert(
+            scalar_type_bits(register_type) == (is_b64 ? 32 : (is_b16 ? 8 : 16)),
+            is_b64 ? "mov.b64 pack register components must be 32 bits."
+                   : (is_b16
+                          ? "mov.b16 pack register components must be 8 bits."
+                          : "mov.b32 pack register components must be 16 bits."));
       }
-    } else {
+    } else if (has_literal) {
       const unsigned vector_width = vector_width_from_options(g_options);
       parse_assert(vector_width != 0,
                    "literal vector store requires a vector qualifier.");
@@ -1133,6 +1233,11 @@ void ptx_recognizer::add_literal_double(double value) {
 void ptx_recognizer::add_scalar_operand(const char *identifier) {
   PTX_PARSE_GPPRINTF("add_scalar_operand");
   const symbol *s = g_current_symbol_table->lookup(identifier);
+  if (s == NULL && strcmp(identifier, "_") == 0) {
+    // PTX '_' write-discard pseudo operand: declare a throwaway register.
+    s = g_current_symbol_table->add_variable(
+        identifier, NULL, 0, gpgpu_ctx->g_filename, ptx_get_lineno(scanner));
+  }
   if (s == NULL) {
     if (g_opcode == BRA_OP || g_opcode == CALLP_OP) {
       // forward branch target...

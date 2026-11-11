@@ -75,6 +75,31 @@ constexpr std::array<uint64_t, 16> kQPrefillSmoke = {
     0x0000000000001000ull, 0x0000000400000001ull,
 };
 
+constexpr std::array<uint64_t, 16> kQPrefillSmokeBf16 = {
+    // Same descriptor as kQPrefillSmoke but the dtype nibble of the CuTe DSL
+    // load magic is 5 (bf16) instead of 3 (fp16): 0x46332 -> 0x46532.
+    0x0000000000100000ull, 0x0000001000046532ull,
+    0x0000080000000008ull, 0x0000000000000000ull,
+    0x0000007f0000003full, 0x0000000000000001ull,
+    0x3f00000000000000ull, 0x000000000000007full,
+    0x0000000500000001ull, 0x0000000000028000ull,
+    0x0000000000028000ull, 0x0000000000028000ull,
+    0x0000000000187d39ull, 0x0000000000187d39ull,
+    0x0000000000001000ull, 0x0000000400000001ull,
+};
+
+constexpr std::array<uint64_t, 16> kQPrefillSmokeBadNibble = {
+    // Unknown dtype nibble 7: must be rejected.
+    0x0000000000100000ull, 0x0000001000046732ull,
+    0x0000080000000008ull, 0x0000000000000000ull,
+    0x0000007f0000003full, 0x0000000000000001ull,
+    0x3f00000000000000ull, 0x000000000000007full,
+    0x0000000500000001ull, 0x0000000000028000ull,
+    0x0000000000028000ull, 0x0000000000028000ull,
+    0x0000000000187d39ull, 0x0000000000187d39ull,
+    0x0000000000001000ull, 0x0000000400000001ull,
+};
+
 constexpr std::array<uint64_t, 16> kKPrefillSmoke = {
     // Same launch as kQPrefillSmoke, K descriptor.
     0x0000000000200000ull, 0x0000001000046332ull,
@@ -204,4 +229,20 @@ TEST(Fa4OpaqueTensorMapTest, RejectsNullGlobalAddress) {
 
   tensormap_descriptor_t decoded{};
   EXPECT_FALSE(decode_sm100_opaque_tensormap(make_encoded(raw), decoded));
+}
+
+TEST(Fa4OpaqueTensorMapTest, DecodesBf16LoadDescriptor) {
+  tensormap_descriptor_t decoded{};
+  ASSERT_TRUE(decode_sm100_opaque_tensormap(make_encoded(kQPrefillSmokeBf16),
+                                            decoded));
+  EXPECT_EQ(decoded.fields.tensorDataType, TMA_DTYPE_BF16);
+  EXPECT_EQ(decoded.fields.globalAddress, 0x100000ull);
+  EXPECT_EQ(decoded.fields.globalDim[0], 64u);
+  EXPECT_EQ(decoded.fields.globalDim[1], 128u);
+}
+
+TEST(Fa4OpaqueTensorMapTest, RejectsUnknownDtypeNibble) {
+  tensormap_descriptor_t decoded{};
+  EXPECT_FALSE(decode_sm100_opaque_tensormap(
+      make_encoded(kQPrefillSmokeBadNibble), decoded));
 }

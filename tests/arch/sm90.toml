@@ -6,6 +6,8 @@ config = "SM90_H100"
 sources = [
   # Host-side simulator regression.
   "unit/register_view_reload_test.cc",
+  "unit/cvt_bf16_test.cu",
+  "unit/cvt_fp8_test.cu",
   "unit/mbarrier_retry_timing_test.cc",
 
   # Portable integration tests.
@@ -19,6 +21,7 @@ sources = [
   "integration/ldst_multi_sector_test.cu",
   "integration/cp_async_src_size_test.cu",
   "integration/shared_atomic_address_test.cu",
+  "integration/red_test.cu",
   "integration/cluster_basic_test.cu",
   "integration/cluster_launch_api_test.cu",
   "integration/cluster_multicast_multicluster_test.cu",
@@ -36,6 +39,7 @@ sources = [
   "wgmma/wgmma_b1_test.cu",
   "wgmma/wgmma_bf16_test.cu",
   "wgmma/wgmma_f16_test.cu",
+  "wgmma/wgmma_lowp_n_test.cu",
   "wgmma/wgmma_fp8_test.cu",
   "wgmma/wgmma_s8_test.cu",
   "wgmma/wgmma_tf32_test.cu",

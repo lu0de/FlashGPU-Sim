@@ -535,24 +535,27 @@ void tensor_wgmma_impl(const ptx_instruction *pI, core_t *core,
   }
 
   if (accumulator_type == F32_TYPE && a_type == BF16_TYPE &&
-      b_type == BF16_TYPE && pI->get_wgmma_shape_n() == 8 &&
+      b_type == BF16_TYPE && pI->get_wgmma_shape_n() >= 8 &&
+      pI->get_wgmma_shape_n() <= 256 && (pI->get_wgmma_shape_n() % 8) == 0 &&
       pI->get_wgmma_shape_k() == 16) {
-    wgmma_m64n8k16_bf16_impl(pI, core, inst);
+    wgmma_m64nXk16_bf16_impl(pI, core, inst);
     return;
   }
 
   if (accumulator_type == F32_TYPE && a_type == TF32_TYPE &&
-      b_type == TF32_TYPE && pI->get_wgmma_shape_n() == 8 &&
+      b_type == TF32_TYPE && pI->get_wgmma_shape_n() >= 8 &&
+      pI->get_wgmma_shape_n() <= 256 && (pI->get_wgmma_shape_n() % 8) == 0 &&
       pI->get_wgmma_shape_k() == 8) {
-    wgmma_m64n8k8_tf32_impl(pI, core, inst);
+    wgmma_m64nXk8_tf32_impl(pI, core, inst);
     return;
   }
 
   if (accumulator_type == F32_TYPE &&
       (a_type == E4M3_TYPE || a_type == E5M2_TYPE) &&
       (b_type == E4M3_TYPE || b_type == E5M2_TYPE) &&
-      pI->get_wgmma_shape_n() == 8 && pI->get_wgmma_shape_k() == 32) {
-    wgmma_m64n8k32_fp8_impl(pI, core, inst, a_type == E4M3_TYPE,
+      pI->get_wgmma_shape_n() >= 8 && pI->get_wgmma_shape_n() <= 256 &&
+      (pI->get_wgmma_shape_n() % 8) == 0 && pI->get_wgmma_shape_k() == 32) {
+    wgmma_m64nXk32_fp8_impl(pI, core, inst, a_type == E4M3_TYPE,
                             b_type == E4M3_TYPE);
     return;
   }
@@ -560,8 +563,9 @@ void tensor_wgmma_impl(const ptx_instruction *pI, core_t *core,
   if (accumulator_type == S32_TYPE &&
       (a_type == S8_TYPE || a_type == U8_TYPE) &&
       (b_type == S8_TYPE || b_type == U8_TYPE) &&
-      pI->get_wgmma_shape_n() == 8 && pI->get_wgmma_shape_k() == 32) {
-    wgmma_m64n8k32_int8_impl(pI, core, inst, a_type == S8_TYPE,
+      pI->get_wgmma_shape_n() >= 8 && pI->get_wgmma_shape_n() <= 256 &&
+      (pI->get_wgmma_shape_n() % 8) == 0 && pI->get_wgmma_shape_k() == 32) {
+    wgmma_m64nXk32_int8_impl(pI, core, inst, a_type == S8_TYPE,
                              b_type == S8_TYPE);
     return;
   }
